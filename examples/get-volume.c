@@ -95,7 +95,7 @@ on_introspection (GObject *object, GAsyncResult *res, gpointer user_data)
         if (error != NULL) {
                 g_critical ("%s", error->message);
                 g_clear_error (&error);
-        } else {
+        } else if (out_values != NULL) {
                 g_print ("Current volume: %s\n",
                          g_value_get_string (out_values->data));
         }
@@ -126,7 +126,11 @@ int main(int argc, char *argv[])
         GError *error = NULL;
         GMainLoop *loop = g_main_loop_new (NULL, FALSE);
 
-        GUPnPContext *context = gupnp_context_new ("wlp3s0", 0, &error);
+        GUPnPContext *context = gupnp_context_new_full ("wlp3s0",
+                                                        NULL,
+                                                        0,
+                                                        GSSDP_UDA_VERSION_1_0,
+                                                        &error);
 
         if (error != NULL) {
                 g_error ("%s", error->message);

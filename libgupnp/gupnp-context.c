@@ -11,17 +11,21 @@
  */
 
 /**
- * SECTION:gupnp-context
- * @short_description: Context object wrapping shared networking bits.
+ * GUPnPContext:
+ *
+ * Context object wrapping shared networking bits.
  *
  * #GUPnPContext wraps the networking bits that are used by the various
  * GUPnP classes. It automatically starts a web server on demand.
  *
  * For debugging, it is possible to see the messages being sent and received by
- * exporting <envar>GUPNP_DEBUG</envar>.
+ * setting the environment variable `GUPNP_DEBUG`.
  */
 
+#define G_LOG_DOMAIN "gupnp-context"
+
 #include <config.h>
+
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
@@ -36,7 +40,6 @@
 #endif
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <libsoup/soup-address.h>
 #include <glib/gstdio.h>
 
 #include "gupnp-acl.h"
@@ -52,10 +55,9 @@
 
 static void
 gupnp_acl_server_handler (SoupServer *server,
-                          SoupMessage *msg,
+                          SoupServerMessage *msg,
                           const char *path,
                           GHashTable *query,
-                          SoupClientContext *client,
                           gpointer user_data);
 
 static void
@@ -63,14 +65,12 @@ gupnp_context_initable_iface_init (gpointer g_iface,
                                    gpointer iface_data);
 
 struct _GUPnPContextPrivate {
-        guint        port;
-
         guint        subscription_timeout;
 
         SoupSession *session;
 
         SoupServer  *server; /* Started on demand */
-        SoupURI     *server_uri;
+        GUri *server_uri;
         char        *default_language;
 
         GList       *host_path_datas;
@@ -88,14 +88,14 @@ G_DEFINE_TYPE_EXTENDED (GUPnPContext,
                                 (G_TYPE_INITABLE,
                                  gupnp_context_initable_iface_init))
 
-enum {
+enum
+{
         PROP_0,
-        PROP_PORT,
         PROP_SERVER,
         PROP_SESSION,
         PROP_SUBSCRIPTION_TIMEOUT,
         PROP_DEFAULT_LANGUAGE,
-        PROP_ACL
+        PROP_ACL,
 };
 
 typedef struct {
@@ -188,22 +188,22 @@ gupnp_context_initable_init (GInitable     *initable,
         priv->session = soup_session_new ();
 
         user_agent = g_strdup_printf ("%s GUPnP/" VERSION " DLNADOC/1.50",
-                                      g_get_prgname ()? : "");
-        g_object_set (priv->session,
-                      SOUP_SESSION_USER_AGENT,
-                      user_agent,
-                      NULL);
+                                      g_get_prgname()? : "");
+
+        soup_session_set_user_agent (priv->session, user_agent);
         g_free (user_agent);
 
         if (g_getenv ("GUPNP_DEBUG")) {
                 SoupLogger *logger;
-                logger = soup_logger_new (SOUP_LOGGER_LOG_BODY, -1);
+                logger = soup_logger_new (SOUP_LOGGER_LOG_BODY);
                 soup_session_add_feature (priv->session,
                                           SOUP_SESSION_FEATURE (logger));
         }
 
         /* Create the server already if the port is not null*/
-        if (priv->port != 0) {
+        guint port = gssdp_client_get_port (GSSDP_CLIENT (context));
+        if (port != 0) {
+                // Create the server
                 gupnp_context_get_server (context);
 
                 if (priv->server == NULL) {
@@ -214,7 +214,7 @@ gupnp_context_initable_init (GInitable     *initable,
                                      GUPNP_SERVER_ERROR,
                                      GUPNP_SERVER_ERROR_OTHER,
                                      "Could not create HTTP server on port %d",
-                                     priv->port);
+                                     port);
 
                         return FALSE;
                 }
@@ -245,9 +245,6 @@ gupnp_context_set_property (GObject      *object,
         priv = gupnp_context_get_instance_private (context);
 
         switch (property_id) {
-        case PROP_PORT:
-                priv->port = g_value_get_uint (value);
-                break;
         case PROP_SUBSCRIPTION_TIMEOUT:
                 priv->subscription_timeout = g_value_get_uint (value);
                 break;
@@ -276,10 +273,6 @@ gupnp_context_get_property (GObject    *object,
         context = GUPNP_CONTEXT (object);
 
         switch (property_id) {
-        case PROP_PORT:
-                g_value_set_uint (value,
-                                  gupnp_context_get_port (context));
-                break;
         case PROP_SERVER:
                 g_value_set_object (value,
                                     gupnp_context_get_server (context));
@@ -330,6 +323,7 @@ gupnp_context_dispose (GObject *object)
         }
 
         g_clear_object (&priv->server);
+        g_clear_object (&priv->acl);
 
         /* Call super */
         object_class = G_OBJECT_CLASS (gupnp_context_parent_class);
@@ -349,48 +343,11 @@ gupnp_context_finalize (GObject *object)
         g_free (priv->default_language);
 
         if (priv->server_uri)
-                soup_uri_free (priv->server_uri);
+                g_uri_unref (priv->server_uri);
 
         /* Call super */
         object_class = G_OBJECT_CLASS (gupnp_context_parent_class);
         object_class->finalize (object);
-}
-
-static GObject *
-gupnp_context_constructor (GType                  type,
-                           guint                  n_construct_params,
-                           GObjectConstructParam *construct_params)
-{
-        GObjectClass *object_class;
-        guint port = 0, msearch_port = 0;
-        guint i;
-        int msearch_idx = -1;
-
-        for (i = 0; i < n_construct_params; i++) {
-                const char *par_name;
-
-                par_name = construct_params[i].pspec->name;
-
-                if (strcmp (par_name, "port") == 0)
-                        port = g_value_get_uint (construct_params[i].value);
-                else if (strcmp (par_name, "msearch-port") == 0) {
-                        msearch_idx = i;
-                        msearch_port = g_value_get_uint
-                                        (construct_params[i].value);
-                }
-        }
-
-        object_class = G_OBJECT_CLASS (gupnp_context_parent_class);
-
-        /* Override msearch-port property if port is set, the property exists
-         * and wasn't provided otherwise */
-        if (port != 0 && msearch_idx != -1 && msearch_port == 0) {
-                g_value_set_uint (construct_params[msearch_idx].value, port);
-        }
-
-        return object_class->constructor (type,
-                                          n_construct_params,
-                                          construct_params);
 }
 
 
@@ -405,28 +362,9 @@ gupnp_context_class_init (GUPnPContextClass *klass)
         object_class->get_property = gupnp_context_get_property;
         object_class->dispose      = gupnp_context_dispose;
         object_class->finalize     = gupnp_context_finalize;
-        object_class->constructor  = gupnp_context_constructor;
 
         /**
-         * GUPnPContext:port:
-         *
-         * The port to run on. Set to 0 if you don't care what port to run on.
-         **/
-        g_object_class_install_property
-                (object_class,
-                 PROP_PORT,
-                 g_param_spec_uint ("port",
-                                    "Port",
-                                    "Port to run on",
-                                    0, G_MAXUINT, SOUP_ADDRESS_ANY_PORT,
-                                    G_PARAM_READWRITE |
-                                    G_PARAM_CONSTRUCT_ONLY |
-                                    G_PARAM_STATIC_NAME |
-                                    G_PARAM_STATIC_NICK |
-                                    G_PARAM_STATIC_BLURB));
-
-        /**
-         * GUPnPContext:server:
+         * GUPnPContext:server:(attributes org.gtk.Property.get=gupnp_context_get_server)
          *
          * The #SoupServer HTTP server used by GUPnP.
          **/
@@ -443,7 +381,7 @@ gupnp_context_class_init (GUPnPContextClass *klass)
                                       G_PARAM_STATIC_BLURB));
 
         /**
-         * GUPnPContext:session:
+         * GUPnPContext:session:(attributes org.gtk.Property.get=gupnp_context_get_session)
          *
          * The #SoupSession object used by GUPnP.
          **/
@@ -460,7 +398,7 @@ gupnp_context_class_init (GUPnPContextClass *klass)
                                       G_PARAM_STATIC_BLURB));
 
         /**
-         * GUPnPContext:subscription-timeout:
+         * GUPnPContext:subscription-timeout:(attributes org.gtk.Property.get=gupnp_context_get_subscription_timeout org.gtk.Property.set=gupnp_context_set_subscription_timeout)
          *
          * The preferred subscription timeout: the number of seconds after
          * which subscriptions are renewed. Set to '0' if subscriptions 
@@ -481,7 +419,7 @@ gupnp_context_class_init (GUPnPContextClass *klass)
                                     G_PARAM_STATIC_NICK |
                                     G_PARAM_STATIC_BLURB));
         /**
-         * GUPnPContext:default-language:
+         * GUPnPContext:default-language:(attributes org.gtk.Property.get=gupnp_context_get_default_language org.gtk.Property.set=gupnp_context_set_default_language)
          *
          * The content of the Content-Language header id the client
          * sends Accept-Language and no language-specific pages to serve
@@ -503,7 +441,7 @@ gupnp_context_class_init (GUPnPContextClass *klass)
                                       G_PARAM_STATIC_BLURB));
 
         /**
-         * GUPnPContext:acl:
+         * GUPnPContext:acl:(attributes org.gtk.Property.get=gupnp_context_get_acl org.gtk.Property.set=gupnp_context_set_acl)
          *
          * An access control list.
          *
@@ -522,7 +460,7 @@ gupnp_context_class_init (GUPnPContextClass *klass)
 }
 
 /**
- * gupnp_context_get_session:
+ * gupnp_context_get_session:(attributes org.gtk.Method.get_property=session)
  * @context: A #GUPnPContext
  *
  * Get the #SoupSession object that GUPnP is using.
@@ -548,18 +486,19 @@ gupnp_context_get_session (GUPnPContext *context)
  * Default server handler: Return 404 not found.
  **/
 static void
-default_server_handler (G_GNUC_UNUSED SoupServer        *server,
-                        SoupMessage                     *msg,
-                        G_GNUC_UNUSED const char        *path,
-                        G_GNUC_UNUSED GHashTable        *query,
-                        G_GNUC_UNUSED SoupClientContext *client,
-                        G_GNUC_UNUSED gpointer           user_data)
+default_server_handler (G_GNUC_UNUSED SoupServer *server,
+                        SoupServerMessage *msg,
+                        G_GNUC_UNUSED const char *path,
+                        G_GNUC_UNUSED GHashTable *query,
+                        G_GNUC_UNUSED gpointer user_data)
 {
-        soup_message_set_status (msg, SOUP_STATUS_NOT_FOUND);
+        soup_server_message_set_status (msg,
+                                        SOUP_STATUS_NOT_FOUND,
+                                        "Not found");
 }
 
 /**
- * gupnp_context_get_server:
+ * gupnp_context_get_server:(attributes org.gtk.Method.get_property=server)
  * @context: A #GUPnPContext
  *
  * Get the #SoupServer HTTP server that GUPnP is using.
@@ -590,25 +529,25 @@ gupnp_context_get_server (GUPnPContext *context)
 
                 ip = gssdp_client_get_host_ip (GSSDP_CLIENT (context));
                 inet_addr = gssdp_client_get_address (GSSDP_CLIENT (context));
+                guint port = gssdp_client_get_port (GSSDP_CLIENT (context));
                 if (g_inet_address_get_family (inet_addr) == G_SOCKET_FAMILY_IPV6 &&
                     g_inet_address_get_is_link_local (inet_addr)) {
-                        guint scope;
-
-                        scope = gssdp_client_get_index (GSSDP_CLIENT (context));
+                        guint scope =
+                                gssdp_client_get_index (GSSDP_CLIENT (context));
                         addr = g_object_new (G_TYPE_INET_SOCKET_ADDRESS,
                                              "address", inet_addr,
-                                             "port", priv->port,
+                                             "port", port,
                                              "scope-id", scope,
                                              NULL);
                 } else {
-                        addr = g_inet_socket_address_new (inet_addr,
-                                                          priv->port);
+                        addr = g_inet_socket_address_new (inet_addr, port);
                 }
                 g_object_unref (inet_addr);
 
                 if (! soup_server_listen (priv->server,
                                           addr, (SoupServerListenOptions) 0, &error)) {
-                        g_warning ("GUPnPContext: Unable to listen on %s:%u %s", ip, priv->port, error->message);
+                        g_clear_object (&priv->server);
+                        g_warning ("Unable to listen on %s:%u %s", ip, port, error->message);
                         g_error_free (error);
                 }
 
@@ -621,21 +560,22 @@ gupnp_context_get_server (GUPnPContext *context)
 /*
  * Makes a SoupURI that refers to our server.
  **/
-static SoupURI *
+static GUri *
 make_server_uri (GUPnPContext *context)
 {
         SoupServer *server = gupnp_context_get_server (context);
         GSList *uris = soup_server_get_uris (server);
         if (uris)
         {
-                SoupURI *uri = soup_uri_copy (uris->data);
-                g_slist_free_full (uris, (GDestroyNotify) soup_uri_free);
+                GUri *uri = g_uri_ref (uris->data);
+                g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
                 return uri;
         }
         return NULL;
 }
 
-SoupURI *
+GUri *
 _gupnp_context_get_server_uri (GUPnPContext *context)
 {
         GUPnPContextPrivate *priv;
@@ -645,7 +585,7 @@ _gupnp_context_get_server_uri (GUPnPContext *context)
                 priv->server_uri = make_server_uri (context);
 
         if (priv->server_uri)
-                return soup_uri_copy (priv->server_uri);
+                return g_uri_ref (priv->server_uri);
 
         return NULL;
 }
@@ -657,8 +597,10 @@ _gupnp_context_get_server_uri (GUPnPContext *context)
  * @port: Port to run on, or 0 if you don't care what port is used.
  * @error: (inout)(optional)(nullable): A location to store a #GError, or %NULL
  *
- * Create a new #GUPnPContext with the specified @main_context, @iface and
+ * Create a new #GUPnPContext with the specified @iface and
  * @port.
+ *
+ * Deprecated: 1.6. Use [ctor@GUPnP.Context.new_for_address] instead
  *
  * Return value: A new #GUPnPContext object, or %NULL on an error
  **/
@@ -676,6 +618,71 @@ gupnp_context_new (const char   *iface,
 }
 
 /**
+ * gupnp_context_new_full:
+ * @iface: (nullable): the name of a network interface
+ * @addr: (nullable): an IP address or %NULL for auto-detection. If you do not
+ * care about the address, but want to specify an address family, use
+ * [ctor@Glib.InetAddress.new_any] with the appropriate family instead.
+ * @port: The network port to use for M-SEARCH requests or 0 for
+ * random.
+ * @uda_version: The UDA version this client will adhere to
+ * @error: (allow-none): Location to store error, or %NULL.
+ *
+ * Creates a GUPnP context with address @addr on network interface @iface. If
+ * neither is specified, GUPnP will chose the address it deems most suitable.
+ *
+ * Since: 1.6.
+ *
+ * Return value: (nullable):  A new #GSSDPClient object or %NULL on error.
+ */
+GUPnPContext *
+gupnp_context_new_full (const char *iface,
+                       GInetAddress *addr,
+                       guint16 port,
+                       GSSDPUDAVersion uda_version,
+                       GError **error)
+{
+        return g_initable_new (GUPNP_TYPE_CONTEXT,
+                               NULL,
+                               error,
+                               "interface",
+                               iface,
+                               "address",
+                               addr,
+                               "port",
+                               port,
+                               "uda-version",
+                               uda_version,
+                               NULL);
+}
+
+/**
+ * gupnp_context_new_for_address
+ * @addr: (nullable): an IP address or %NULL for auto-detection. If you do not
+ * care about the address, but want to specify an address family, use
+ * [ctor@Glib.InetAddress.new_any] with the appropriate family instead.
+ * @port: The network port to use for M-SEARCH requests or 0 for
+ * random.
+ * @uda_version: The UDA version this client will adhere to
+ * @error: (allow-none): Location to store error, or %NULL.
+ *
+ * Creates a GUPnP context with address @addr. If none is specified, GUPnP
+ * will chose the address it deems most suitable.
+ *
+ * Since: 1.6.
+ *
+ * Return value: (nullable):  A new #GSSDPClient object or %NULL on error.
+ */
+GUPnPContext *
+gupnp_context_new_for_address (GInetAddress *addr,
+                                guint16 port,
+                                GSSDPUDAVersion uda_version,
+                                GError **error)
+{
+        return gupnp_context_new_full (NULL, addr, port, uda_version, error);
+}
+
+/**
  * gupnp_context_get_port:
  * @context: A #GUPnPContext
  *
@@ -686,19 +693,16 @@ gupnp_context_new (const char   *iface,
 guint
 gupnp_context_get_port (GUPnPContext *context)
 {
-        GUPnPContextPrivate *priv;
-
         g_return_val_if_fail (GUPNP_IS_CONTEXT (context), 0);
-        priv = gupnp_context_get_instance_private (context);
 
-        if (priv->server_uri == NULL)
-                priv->server_uri = make_server_uri (context);
+        GUri *uri = _gupnp_context_get_server_uri (context);
+        g_uri_unref (uri);
 
-        return soup_uri_get_port (priv->server_uri);
+        return g_uri_get_port (uri);
 }
 
 /**
- * gupnp_context_set_subscription_timeout:
+ * gupnp_context_set_subscription_timeout:(attributes org.gtk.Method.set_property=subscription-timeout)
  * @context: A #GUPnPContext
  * @timeout: Event subscription timeout in seconds
  *
@@ -721,7 +725,7 @@ gupnp_context_set_subscription_timeout (GUPnPContext *context,
 }
 
 /**
- * gupnp_context_get_subscription_timeout:
+ * gupnp_context_get_subscription_timeout:(attributes org.gtk.Method.get_property=subscription-timeout)
  * @context: A #GUPnPContext
  *
  * Get the event subscription timeout (in seconds), or 0 meaning there is no
@@ -755,7 +759,7 @@ host_path_data_set_language (HostPathData *data, const char *language)
 }
 
 /**
- * gupnp_context_set_default_language:
+ * gupnp_context_set_default_language:(attributes org.gtk.Method.set_property=default-language)
  * @context: A #GUPnPContext
  * @language: A language tag as defined in RFC 2616 3.10
  *
@@ -795,7 +799,7 @@ gupnp_context_set_default_language (GUPnPContext *context,
 }
 
 /**
- * gupnp_context_get_default_language:
+ * gupnp_context_get_default_language:(attributes org.gtk.Method.get_property=default-language)
  * @context: A #GUPnPContext
  *
  * Get the default Content-Language header for this context.
@@ -891,17 +895,20 @@ append_locale (const char *local_path, GList *locales)
 
 /* Redirect @msg to the same URI, but with a slash appended. */
 static void
-redirect_to_folder (SoupMessage *msg)
+redirect_to_folder (SoupServerMessage *msg)
 {
         char *uri, *redir_uri;
 
-        uri = soup_uri_to_string (soup_message_get_uri (msg),
-                                  FALSE);
+        uri = g_uri_to_string_partial (soup_server_message_get_uri (msg),
+                                       G_URI_HIDE_PASSWORD);
         redir_uri = g_strdup_printf ("%s/", uri);
-        soup_message_headers_append (msg->response_headers,
-                                     "Location", redir_uri);
-        soup_message_set_status (msg,
-                                 SOUP_STATUS_MOVED_PERMANENTLY);
+        soup_message_headers_append (
+                soup_server_message_get_response_headers (msg),
+                "Location",
+                redir_uri);
+        soup_server_message_set_status (msg,
+                                        SOUP_STATUS_MOVED_PERMANENTLY,
+                                        "Moved permanently");
         g_free (redir_uri);
         g_free (uri);
 }
@@ -930,12 +937,11 @@ update_client_cache (GUPnPContext *context,
 /* Serve @path. Note that we do not need to check for path including bogus
  * '..' as libsoup does this for us. */
 static void
-host_path_handler (G_GNUC_UNUSED SoupServer        *server,
-                   SoupMessage                     *msg,
-                   const char                      *path,
-                   G_GNUC_UNUSED GHashTable        *query,
-                   SoupClientContext               *client_ctx,
-                   gpointer                         user_data)
+host_path_handler (G_GNUC_UNUSED SoupServer *server,
+                   SoupServerMessage *msg,
+                   const char *path,
+                   G_GNUC_UNUSED GHashTable *query,
+                   gpointer user_data)
 {
         char *local_path, *path_to_open;
         GStatBuf st;
@@ -946,6 +952,7 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
         HostPathData *host_path_data;
         const char *user_agent;
         const char *host;
+        GBytes *buffer = NULL;
 
         orig_locales = NULL;
         locales      = NULL;
@@ -953,9 +960,11 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
         path_to_open = NULL;
         host_path_data = (HostPathData *) user_data;
 
-        if (msg->method != SOUP_METHOD_GET &&
-            msg->method != SOUP_METHOD_HEAD) {
-                soup_message_set_status (msg, SOUP_STATUS_NOT_IMPLEMENTED);
+        if (soup_server_message_get_method (msg) != SOUP_METHOD_GET &&
+            soup_server_message_get_method (msg) != SOUP_METHOD_HEAD) {
+                soup_server_message_set_status (msg,
+                                                SOUP_STATUS_NOT_IMPLEMENTED,
+                                                "Not implemented");
 
                 goto DONE;
         }
@@ -964,16 +973,18 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
          * Also set Connection: close header, since the request originated
          * from a HTTP 1.0 client
          */
-        if (soup_message_get_http_version (msg) == SOUP_HTTP_1_0) {
-                soup_message_set_http_version (msg, SOUP_HTTP_1_1);
-                soup_message_headers_append (msg->response_headers,
-                                             "Connection",
-                                             "close");
+        if (soup_server_message_get_http_version (msg) == SOUP_HTTP_1_0) {
+                soup_server_message_set_http_version (msg, SOUP_HTTP_1_1);
+                soup_message_headers_append (
+                        soup_server_message_get_response_headers (msg),
+                        "Connection",
+                        "close");
         }
 
-        user_agent = soup_message_headers_get_one (msg->request_headers,
-                                                   "User-Agent");
-        host = soup_client_context_get_host (client_ctx);
+        user_agent = soup_message_headers_get_one (
+                soup_server_message_get_request_headers (msg),
+                "User-Agent");
+        host = soup_server_message_get_remote_host (msg);
 
         /* If there was no User-Agent in the request, try to guess from the
          * discovery message and put it into the response headers for further
@@ -985,9 +996,10 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
                 user_agent = gssdp_client_guess_user_agent (client, host);
 
                 if (user_agent != NULL) {
-                        soup_message_headers_append (msg->response_headers,
-                                                     "User-Agent",
-                                                     user_agent);
+                        soup_message_headers_append (
+                                soup_server_message_get_response_headers (msg),
+                                "User-Agent",
+                                user_agent);
                 }
         } else {
                 update_client_cache (host_path_data->context, host, user_agent);
@@ -996,13 +1008,16 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
         /* Construct base local path */
         local_path = construct_local_path (path, user_agent, host_path_data);
         if (!local_path) {
-                soup_message_set_status (msg, SOUP_STATUS_BAD_REQUEST);
+                soup_server_message_set_status (msg,
+                                                SOUP_STATUS_BAD_REQUEST,
+                                                "Bad request");
 
                 goto DONE;
         }
 
         /* Get preferred locales */
-        orig_locales = locales = http_request_get_accept_locales (msg);
+        orig_locales = locales = http_request_get_accept_locales (
+                soup_server_message_get_request_headers (msg));
 
  AGAIN:
         /* Add locale suffix if available */
@@ -1011,7 +1026,9 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
         /* See what we've got */
         if (g_stat (path_to_open, &st) == -1) {
                 if (errno == EPERM)
-                        soup_message_set_status (msg, SOUP_STATUS_FORBIDDEN);
+                        soup_server_message_set_status (msg,
+                                                        SOUP_STATUS_FORBIDDEN,
+                                                        "Forbidden");
                 else if (errno == ENOENT) {
                         if (locales) {
                                 g_free (path_to_open);
@@ -1020,11 +1037,15 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
 
                                 goto AGAIN;
                         } else
-                                soup_message_set_status (msg,
-                                                         SOUP_STATUS_NOT_FOUND);
+                                soup_server_message_set_status (
+                                        msg,
+                                        SOUP_STATUS_NOT_FOUND,
+                                        "Not found");
                 } else
-                        soup_message_set_status
-                                (msg, SOUP_STATUS_INTERNAL_SERVER_ERROR);
+                        soup_server_message_set_status (
+                                msg,
+                                SOUP_STATUS_INTERNAL_SERVER_ERROR,
+                                "Internal server error");
 
                 goto DONE;
         }
@@ -1059,25 +1080,40 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
 
                 g_error_free (error);
 
-                soup_message_set_status (msg,
-                                         SOUP_STATUS_INTERNAL_SERVER_ERROR);
+                soup_server_message_set_status (
+                        msg,
+                        SOUP_STATUS_INTERNAL_SERVER_ERROR,
+                        "Internal server error");
 
                 goto DONE;
         }
 
         /* Handle method (GET or HEAD) */
         status = SOUP_STATUS_OK;
+        SoupMessageHeaders *response_headers =
+                soup_server_message_get_response_headers (msg);
+        SoupMessageHeaders *request_headers =
+                soup_server_message_get_request_headers (msg);
 
-        if (msg->method == SOUP_METHOD_GET) {
+        /* Add requested content */
+        // Creating the buffer here regardless of whether we use it.
+        // It will take ownership of the mapped file and we can unref it on exit
+        // This will prevent leaking the mapped file in other cases
+        buffer = g_bytes_new_with_free_func (
+                g_mapped_file_get_contents (mapped_file),
+                g_mapped_file_get_length (mapped_file),
+                (GDestroyNotify) g_mapped_file_unref,
+                mapped_file);
+
+        if (soup_server_message_get_method (msg) == SOUP_METHOD_GET) {
                 gboolean have_range;
-                SoupBuffer *buffer;
                 SoupRange *ranges;
                 int nranges;
 
                 /* Find out range */
                 have_range = FALSE;
 
-                if (soup_message_headers_get_ranges (msg->request_headers,
+                if (soup_message_headers_get_ranges (request_headers,
                                                      st.st_size,
                                                      &ranges,
                                                      &nranges))
@@ -1089,90 +1125,86 @@ host_path_handler (G_GNUC_UNUSED SoupServer        *server,
                                    st.st_size < 0 ||
                                    ranges[0].start >= st.st_size ||
                                    ranges[0].start > ranges[0].end)) {
-                        soup_message_set_status
-                                (msg,
-                                 SOUP_STATUS_REQUESTED_RANGE_NOT_SATISFIABLE);
-                        soup_message_headers_free_ranges (msg->request_headers,
+                        soup_server_message_set_status (
+                                msg,
+                                SOUP_STATUS_REQUESTED_RANGE_NOT_SATISFIABLE,
+                                "Range not satisfyable");
+                        soup_message_headers_free_ranges (request_headers,
                                                           ranges);
 
                         goto DONE;
                 }
 
-                /* Add requested content */
-                buffer = soup_buffer_new_with_owner
-                             (g_mapped_file_get_contents (mapped_file),
-                              g_mapped_file_get_length (mapped_file),
-                              mapped_file,
-                              (GDestroyNotify) g_mapped_file_unref);
+                SoupMessageBody *message_body =
+                        soup_server_message_get_response_body (msg);
 
                 /* Set range and status */
                 if (have_range) {
-                        SoupBuffer *range_buffer;
+                        GBytes *range_buffer;
 
-                        soup_message_body_truncate (msg->response_body);
+                        soup_message_body_truncate (message_body);
                         soup_message_headers_set_content_range (
-                                                          msg->response_headers,
-                                                          ranges[0].start,
-                                                          ranges[0].end,
-                                                          buffer->length);
-                        range_buffer = soup_buffer_new_subbuffer (
-                                           buffer,
-                                           ranges[0].start,
-                                           ranges[0].end - ranges[0].start + 1);
-                        soup_message_body_append_buffer (msg->response_body,
-                                                         range_buffer);
+                                response_headers,
+                                ranges[0].start,
+                                ranges[0].end,
+                                g_bytes_get_size (buffer));
+                        range_buffer = g_bytes_new_from_bytes (
+                                buffer,
+                                ranges[0].start,
+                                ranges[0].end - ranges[0].start + 1);
+                        soup_message_body_append_bytes (message_body,
+                                                        range_buffer);
                         status = SOUP_STATUS_PARTIAL_CONTENT;
 
-                        soup_message_headers_free_ranges (msg->request_headers,
+                        soup_message_headers_free_ranges (request_headers,
                                                           ranges);
-                        soup_buffer_free (range_buffer);
+                        g_bytes_unref (range_buffer);
                 } else
-                        soup_message_body_append_buffer (msg->response_body, buffer);
+                        soup_message_body_append_bytes (message_body, buffer);
 
-                soup_buffer_free (buffer);
-        } else if (msg->method == SOUP_METHOD_HEAD) {
+        } else if (soup_server_message_get_method (msg) == SOUP_METHOD_HEAD) {
                 char *length;
 
-                length = g_strdup_printf ("%lu", (gulong) st.st_size);
-                soup_message_headers_append (msg->response_headers,
+                length = g_strdup_printf ("%zu", st.st_size);
+                soup_message_headers_append (response_headers,
                                              "Content-Length",
                                              length);
                 g_free (length);
 
         } else {
-                soup_message_set_status (msg,
-                                         SOUP_STATUS_METHOD_NOT_ALLOWED);
-
+                g_assert_not_reached ();
                 goto DONE;
         }
 
         /* Set Content-Type */
-        http_response_set_content_type (msg,
-                                        path_to_open, 
-                                        (guchar *) g_mapped_file_get_contents
-                                                                (mapped_file),
-                                        st.st_size);
+        http_response_set_content_type (
+                response_headers,
+                path_to_open,
+                (guchar *) g_mapped_file_get_contents (mapped_file),
+                st.st_size);
 
         /* Set Content-Language */
         if (locales)
-                http_response_set_content_locale (msg, locales->data);
-        else if (soup_message_headers_get_one (msg->request_headers,
+                http_response_set_content_locale (response_headers,
+                                                  locales->data);
+        else if (soup_message_headers_get_one (request_headers,
                                                "Accept-Language")) {
-                soup_message_headers_append (msg->response_headers,
+                soup_message_headers_append (response_headers,
                                              "Content-Language",
                                              host_path_data->default_language);
         }
 
         /* Set Accept-Ranges */
-        soup_message_headers_append (msg->response_headers,
+        soup_message_headers_append (response_headers,
                                      "Accept-Ranges",
                                      "bytes");
 
         /* Set status */
-        soup_message_set_status (msg, status);
+        soup_server_message_set_status (msg, status, NULL);
 
  DONE:
         /* Cleanup */
+        g_bytes_unref (buffer);
         g_free (path_to_open);
         g_free (local_path);
 
@@ -1368,7 +1400,7 @@ gupnp_context_unhost_path (GUPnPContext *context,
 }
 
 /**
- * gupnp_context_get_acl:
+ * gupnp_context_get_acl:(attributes org.gtk.Method.get_property=acl)
  * @context: A #GUPnPContext
  *
  * Access the #GUPnPAcl associated with this client. If there isn't any,
@@ -1391,7 +1423,7 @@ gupnp_context_get_acl (GUPnPContext *context)
 }
 
 /**
- * gupnp_context_set_acl:
+ * gupnp_context_set_acl:(attributes org.gtk.Method.set_property=acl)
  * @context: A #GUPnPContext
  * @acl: (nullable): The new access control list or %NULL to remove the
  * current list.
@@ -1426,15 +1458,20 @@ gupnp_acl_async_callback (GUPnPAcl *acl,
         GError *error = NULL;
 
         allowed = gupnp_acl_is_allowed_finish (acl, res, &error);
+#if SOUP_CHECK_VERSION(3,1,2)
+        soup_server_message_unpause (data->message);
+#else
         soup_server_unpause_message (data->server, data->message);
+#endif
         if (!allowed)
-                soup_message_set_status (data->message, SOUP_STATUS_FORBIDDEN);
+                soup_server_message_set_status (data->message,
+                                                SOUP_STATUS_FORBIDDEN,
+                                                "Forbidden");
         else
                 data->handler->callback (data->server,
                                          data->message,
                                          data->path,
                                          data->query,
-                                         data->client,
                                          data->handler->user_data);
 
         acl_async_handler_free (data);
@@ -1442,10 +1479,9 @@ gupnp_acl_async_callback (GUPnPAcl *acl,
 
 static void
 gupnp_acl_server_handler (SoupServer *server,
-                          SoupMessage *msg,
+                          SoupServerMessage *msg,
                           const char *path,
                           GHashTable *query,
-                          SoupClientContext *client,
                           gpointer user_data)
 {
         AclServerHandler *handler = (AclServerHandler *) user_data;
@@ -1455,20 +1491,23 @@ gupnp_acl_server_handler (SoupServer *server,
         GUPnPContextPrivate *priv;
 
         priv = gupnp_context_get_instance_private (handler->context);
-        host = soup_client_context_get_host (client);
+        host = soup_server_message_get_remote_host (msg);
 
         if (handler->service) {
                 g_object_get (handler->service,
                               "root-device", &device,
                               NULL);
 
+                // g_object_get will give us an additional reference here.
+                // drop that immediately
                 if (device != NULL) {
                         g_object_unref (device);
                 }
         }
 
-        agent = soup_message_headers_get_one (msg->request_headers,
-                                              "User-Agent");
+        agent = soup_message_headers_get_one (
+                soup_server_message_get_request_headers (msg),
+                "User-Agent");
         if (agent == NULL) {
                 agent = gssdp_client_guess_user_agent
                                 (GSSDP_CLIENT (handler->context),
@@ -1483,32 +1522,48 @@ gupnp_acl_server_handler (SoupServer *server,
                                                    path,
                                                    host,
                                                    agent)) {
-                                soup_message_set_status (msg, SOUP_STATUS_FORBIDDEN);
+                                soup_server_message_set_status (
+                                        msg,
+                                        SOUP_STATUS_FORBIDDEN,
+                                        "Forbidden");
 
                                 return;
                         }
                 } else {
                         AclAsyncHandler *data;
 
-                        data = acl_async_handler_new (server, msg, path, query, client, handler);
+                        data = acl_async_handler_new (server,
+                                                      msg,
+                                                      path,
+                                                      query,
+                                                      handler);
 
+#if SOUP_CHECK_VERSION(3,1,2)
+                        soup_server_message_pause (msg);
+#else
                         soup_server_pause_message (server, msg);
-                        gupnp_acl_is_allowed_async (priv->acl,
-                                                    device,
-                                                    handler->service,
-                                                    path,
-                                                    soup_client_context_get_host (client),
-                                                    agent,
-                                                    NULL,
-                                                    (GAsyncReadyCallback) gupnp_acl_async_callback,
-                                                    data);
+#endif
+                        // Since we drop the additional reference above, coverity seems to think this is
+                        // use-after-free, but the service is still holding a reference here.
+
+                        // coverity[pass_freed_arg]
+                        gupnp_acl_is_allowed_async (
+                                priv->acl,
+                                device,
+                                handler->service,
+                                path,
+                                host,
+                                agent,
+                                NULL,
+                                (GAsyncReadyCallback) gupnp_acl_async_callback,
+                                data);
 
                         return;
                 }
         }
 
         /* Delegate to orignal callback */
-        handler->callback (server, msg, path, query, client, handler->user_data);
+        handler->callback (server, msg, path, query, handler->user_data);
 }
 
 /**
@@ -1607,7 +1662,7 @@ gupnp_context_remove_server_handler (GUPnPContext *context, const char *path)
 char *
 gupnp_context_rewrite_uri (GUPnPContext *context, const char *uri)
 {
-        SoupURI *soup_uri = NULL;
+        GUri *soup_uri = NULL;
         char *retval = NULL;
 
         soup_uri = gupnp_context_rewrite_uri_to_uri (context, uri);
@@ -1616,8 +1671,8 @@ gupnp_context_rewrite_uri (GUPnPContext *context, const char *uri)
                 return NULL;
         }
 
-        retval = soup_uri_to_string (soup_uri, FALSE);
-        soup_uri_free (soup_uri);
+        retval = g_uri_to_string_partial (soup_uri, G_URI_HIDE_PASSWORD);
+        g_uri_unref (soup_uri);
 
         return retval;
 }
@@ -1636,23 +1691,28 @@ gupnp_context_rewrite_uri (GUPnPContext *context, const char *uri)
  * Since: 1.2.3
  * Stability: Private
  */
-SoupURI *
+GUri *
 gupnp_context_rewrite_uri_to_uri (GUPnPContext *context, const char *uri)
 {
         const char *host = NULL;
-        SoupURI *soup_uri = NULL;
+        GUri *soup_uri = NULL;
         GInetAddress *addr = NULL;
         int index = -1;
+        GError *error = NULL;
 
-        soup_uri = soup_uri_new (uri);
+        soup_uri = g_uri_parse (uri, G_URI_FLAGS_NONE, &error);
 
-        if (soup_uri == NULL) {
-                g_warning ("Invalid call-back url: %s", uri);
+        if (error != NULL) {
+                g_warning ("Invalid call-back url: %s (%s)",
+                           uri,
+                           error->message);
+
+                g_clear_error (&error);
 
                 return NULL;
         }
 
-        host = soup_uri_get_host (soup_uri);
+        host = g_uri_get_host (soup_uri);
         addr = g_inet_address_new_from_string (host);
         index = gssdp_client_get_index (GSSDP_CLIENT (context));
 
@@ -1663,8 +1723,20 @@ gupnp_context_rewrite_uri_to_uri (GUPnPContext *context, const char *uri)
                 new_host = g_strdup_printf ("%s%%%d",
                                             host,
                                             index);
-                soup_uri_set_host (soup_uri, new_host);
+                GUri *new_uri =
+                        soup_uri_copy (soup_uri, SOUP_URI_HOST, new_host, NULL);
                 g_free (new_host);
+                g_uri_unref (soup_uri);
+                soup_uri = new_uri;
+        }
+
+        if (g_inet_address_get_family (addr) !=
+            gssdp_client_get_family (GSSDP_CLIENT (context))) {
+                g_warning ("Address family mismatch while trying to rewrite "
+                           "URI %s",
+                           uri);
+                g_uri_unref (soup_uri);
+                soup_uri = NULL;
         }
 
         g_object_unref (addr);

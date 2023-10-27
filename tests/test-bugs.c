@@ -6,13 +6,13 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-#ifdef HAVE_CONFIG_H
-#include <config.h>
-#endif
-
 #include <libgupnp/gupnp.h>
 #include <libgupnp/gupnp-service-private.h>
 #include <libgupnp/gupnp-context-private.h>
+
+#include <libgssdp/gssdp-resource-group.h>
+#include <libsoup/soup.h>
+
 
 static GUPnPContext *
 create_context (guint16 port, GError **error) {
@@ -89,13 +89,12 @@ test_bgo_696762_on_browse_call (G_GNUC_UNUSED GUPnPService *service,
 
     g_assert (node != NULL);
     g_assert_cmpstr ((const char *) node->name, ==, "SortCriteria");
-    node = node->next;
-    gupnp_service_action_return (action);
+    gupnp_service_action_return_success (action);
 }
 
 static void
-test_bgo_696762_on_browse (G_GNUC_UNUSED GUPnPServiceProxy       *proxy,
-                           G_GNUC_UNUSED GUPnPServiceProxyAction *action,
+test_bgo_696762_on_browse (G_GNUC_UNUSED GObject       *source,
+                           G_GNUC_UNUSED GAsyncResult *res,
                            gpointer                               user_data)
 {
     TestServiceProxyData *data = (TestServiceProxyData *) user_data;
@@ -163,21 +162,37 @@ test_bgo_690400_query_variable (GUPnPService *service,
 }
 
 static gboolean
-test_on_timeout (G_GNUC_UNUSED gpointer user_data)
+test_on_timeout (gpointer user_data)
 {
-    g_assert_not_reached ();
+        g_print ("Timeout in %s\n", (const char *) user_data);
+        g_assert_not_reached ();
 
-    return FALSE;
+        return FALSE;
 }
 
 static void
-test_run_loop (GMainLoop *loop)
+test_run_loop (GMainLoop *loop, const char *name)
 {
-    guint timeout_id = 0;
+        guint timeout_id = 0;
+        int timeout = 2;
 
-    timeout_id = g_timeout_add_seconds (2, test_on_timeout, NULL);
-    g_main_loop_run (loop);
-    g_source_remove (timeout_id);
+        const char *timeout_str = g_getenv ("GUPNP_TEST_TIMEOUT");
+        if (timeout_str != NULL) {
+                long t = atol (timeout_str);
+                if (t != 0)
+                        timeout = t;
+        }
+
+        timeout_id = g_timeout_add_seconds (timeout, test_on_timeout, NULL);
+        g_main_loop_run (loop);
+        g_source_remove (timeout_id);
+}
+
+static gboolean
+delayed_loop_quitter (gpointer user_data)
+{
+        g_main_loop_quit (user_data);
+        return G_SOURCE_REMOVE;
 }
 
 /* Test if a call on a service proxy keeps argument order */
@@ -185,6 +200,7 @@ static void
 test_bgo_696762 (void)
 {
     GUPnPContext *context = NULL;
+    GUPnPContext *server_context = NULL;
     GError *error = NULL;
     GUPnPControlPoint *cp = NULL;
     GUPnPRootDevice *rd;
@@ -197,6 +213,10 @@ test_bgo_696762 (void)
     g_assert_no_error (error);
     g_assert (context != NULL);
 
+    server_context = create_context (0, &error);
+    g_assert_no_error (error);
+    g_assert (server_context != NULL);
+
     cp = gupnp_control_point_new (context,
                                   "urn:test-gupnp-org:service:TestService:1");
 
@@ -208,7 +228,7 @@ test_bgo_696762 (void)
                       &data);
 
 
-    rd = gupnp_root_device_new (context, "TestDevice.xml", DATA_PATH, &error);
+    rd = gupnp_root_device_new (server_context, "TestDevice.xml", DATA_PATH, &error);
     g_assert_no_error (error);
     g_assert (rd != NULL);
     gupnp_root_device_set_available (rd, TRUE);
@@ -219,30 +239,58 @@ test_bgo_696762 (void)
                       G_CALLBACK (test_bgo_696762_on_browse_call),
                       &data);
 
-    test_run_loop (data.loop);
+    test_run_loop (data.loop, g_test_get_path ());
     g_assert (data.proxy != NULL);
 
     G_GNUC_BEGIN_IGNORE_DEPRECATIONS
-    gupnp_service_proxy_begin_action (data.proxy,
-                                      "Browse",
-                                      test_bgo_696762_on_browse,
-                                      &data,
-                                      "ObjectID", G_TYPE_STRING, "0",
-                                      "BrowseFlag", G_TYPE_STRING, "BrowseDirectChildren",
-                                      "Filter", G_TYPE_STRING, "res,dc:date,res@size",
-                                      "StartingIndex", G_TYPE_UINT, 0,
-                                      "RequestedCount", G_TYPE_UINT, 0,
-                                      "SortCriteria", G_TYPE_STRING, "",
-                                      NULL);
-    G_GNUC_END_IGNORE_DEPRECATIONS
 
-    test_run_loop (data.loop);
+    GUPnPServiceProxyAction *a =
+            gupnp_service_proxy_action_new ("Browse",
+                                            "ObjectID",
+                                            G_TYPE_STRING,
+                                            "0",
+                                            "BrowseFlag",
+                                            G_TYPE_STRING,
+                                            "BrowseDirectChildren",
+                                            "Filter",
+                                            G_TYPE_STRING,
+                                            "res,dc:date,res@size",
+                                            "StartingIndex",
+                                            G_TYPE_UINT,
+                                            0,
+                                            "RequestedCount",
+                                            G_TYPE_UINT,
+                                            0,
+                                            "SortCriteria",
+                                            G_TYPE_STRING,
+                                            "",
+                                            NULL);
 
-    g_main_loop_unref (data.loop);
+    gupnp_service_proxy_call_action_async (data.proxy,
+                                           a,
+                                           NULL,
+                                           test_bgo_696762_on_browse,
+                                           &data);
+
+
+    test_run_loop (data.loop, g_test_get_path ());
+
+    gupnp_service_proxy_action_unref (a);
+
+    // tear-down
+    g_object_unref (info);
     g_object_unref (data.proxy);
+
     g_object_unref (cp);
     g_object_unref (rd);
+    g_object_unref (server_context);
     g_object_unref (context);
+
+    // Make sure the source teardown handlers get run so we don't confuse valgrind
+    g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, data.loop);
+    g_main_loop_run (data.loop);
+
+    g_main_loop_unref (data.loop);
 }
 
 /* Test that proxies created by ResourceFactory are of the GType
@@ -266,7 +314,8 @@ test_bgo_678701 (void)
     g_assert_no_error (error);
     g_assert (context != NULL);
 
-    factory = gupnp_resource_factory_get_default ();
+    // Do not pollute the default factory with this test
+    factory = gupnp_resource_factory_new ();
     gupnp_resource_factory_register_resource_proxy_type (factory,
                                                          "urn:test-gupnp-org:service:TestService:1",
                                                          test_bgo_678701_service_get_type ());
@@ -279,15 +328,17 @@ test_bgo_678701 (void)
     g_assert (rd != NULL);
     gupnp_root_device_set_available (rd, TRUE);
 
-    cp = gupnp_control_point_new (context,
-                                  "urn:test-gupnp-org:device:TestDevice:1");
+    cp = gupnp_control_point_new_full (
+            context,
+            factory,
+            "urn:test-gupnp-org:device:TestDevice:1");
     gssdp_resource_browser_set_active (GSSDP_RESOURCE_BROWSER (cp), TRUE);
     g_signal_connect (G_OBJECT (cp),
                       "device-proxy-available",
                       G_CALLBACK (test_bgo_678701_on_dp_available),
                       &data);
 
-    test_run_loop (data.loop);
+    test_run_loop (data.loop, g_test_get_path ());
     g_assert (data.proxy != NULL);
 
     info = gupnp_device_info_get_service (GUPNP_DEVICE_INFO (data.proxy),
@@ -298,11 +349,20 @@ test_bgo_678701 (void)
                                           "urn:test-gupnp-org:device:TestSubDevice:1");
     g_assert_cmpstr(G_OBJECT_TYPE_NAME (dev_info), ==, "TestBgo678701Device");
 
-    g_main_loop_unref (data.loop);
     g_object_unref (data.proxy);
     g_object_unref (cp);
+    g_object_unref (info);
+    g_object_unref (dev_info);
     g_object_unref (rd);
     g_object_unref (context);
+    g_object_unref (factory);
+
+    // Make sure the source teardown handlers get run so we don't confuse valgrind
+    g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, data.loop);
+    g_main_loop_run (data.loop);
+
+    g_main_loop_unref (data.loop);
+
 }
 
 /* Test that removing a notify-callback from the callback itself works
@@ -341,7 +401,7 @@ test_bgo_690400 (void)
                       G_CALLBACK (test_bgo_690400_query_variable), NULL);
     gupnp_root_device_set_available (rd, TRUE);
 
-    test_run_loop (data.loop);
+    test_run_loop (data.loop, "690400 - waiting for query_variable");
     g_assert (data.proxy != NULL);
 
     gupnp_service_proxy_add_notify (data.proxy,
@@ -357,14 +417,19 @@ test_bgo_690400 (void)
 
     gupnp_service_proxy_set_subscribed (data.proxy, TRUE);
 
-    test_run_loop (data.loop);
+    test_run_loop (data.loop, "690400 - waiting for event");
 
-    g_main_loop_unref (data.loop);
     g_object_unref (data.proxy);
     g_object_unref (cp);
     g_object_unref (service);
     g_object_unref (rd);
     g_object_unref (context);
+
+    // Make sure the source teardown handlers get run so we don't confuse valgrind
+    g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, data.loop);
+    g_main_loop_run (data.loop);
+
+    g_main_loop_unref (data.loop);
 }
 
 /* Test that correct icons are returned for various size requests.
@@ -447,7 +512,7 @@ test_bgo_743233 (void)
                                   "usn:uuid:0dc60534-642c-478f-ae61-1d78dbe1f73d");
     g_assert (cp != NULL);
 
-    g_test_expect_message (G_LOG_DOMAIN,
+    g_test_expect_message ("gupnp-control-point",
                            G_LOG_LEVEL_WARNING,
                            "Invalid USN: " TEST_BGO_743233_USN);
     g_signal_emit_by_name (cp, "resource-unavailable", TEST_BGO_743233_USN);
@@ -523,6 +588,323 @@ test_ggo_24 (void)
                 validate_host_header ("[fe80::01%eth0]", "fe80::acab", 4711));
 }
 
+void
+test_ggo_42 ()
+{
+        GUPnPContext *context = NULL;
+        GError *error = NULL;
+        GUPnPRootDevice *rd;
+        GUPnPServiceInfo *info = NULL;
+
+        context = create_context (0, &error);
+        g_assert_no_error (error);
+        g_assert (context != NULL);
+
+        rd = gupnp_root_device_new (context,
+                                    "TestDevice.xml",
+                                    DATA_PATH,
+                                    &error);
+        g_assert_no_error (error);
+        g_assert (rd != NULL);
+        gupnp_root_device_set_available (rd, TRUE);
+        info = gupnp_device_info_get_service (
+                GUPNP_DEVICE_INFO (rd),
+                "urn:test-gupnp-org:service:TestService:1");
+
+        GMainLoop *loop = g_main_loop_new (NULL, FALSE);
+        g_object_unref (rd);
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, loop);
+        g_main_loop_run (loop);
+
+        g_object_unref (info);
+
+        // Make sure the source teardown handlers get run so we don't confuse valgrind
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, loop);
+        g_main_loop_run (loop);
+
+        g_object_unref (context);
+
+        // Make sure the source teardown handlers get run so we don't confuse valgrind
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, loop);
+        g_main_loop_run (loop);
+
+        g_main_loop_unref (loop);
+}
+
+void
+on_control (SoupServer *server,
+            SoupServerMessage *msg,
+            const char *path,
+            GHashTable *query,
+            gpointer user_data)
+{
+        SoupMessageBody *b = soup_server_message_get_response_body (msg);
+
+        g_print ("On Control\n");
+
+        soup_message_body_append (b, SOUP_MEMORY_COPY, "<html>\0", 7);
+        soup_server_message_set_status (msg, SOUP_STATUS_METHOD_NOT_ALLOWED, NULL);
+}
+
+void
+on_event (SoupServer *server,
+          SoupServerMessage *msg,
+          const char *path,
+          GHashTable *query,
+          gpointer user_data)
+{
+        soup_server_message_set_status (msg, SOUP_STATUS_OK, NULL);
+}
+
+typedef struct {
+        GUPnPServiceProxy *p;
+        GMainLoop *loop;
+} TestGGO63Data;
+
+void
+on_proxy (GUPnPControlPoint *cp, GUPnPServiceProxy *p, gpointer user_data)
+{
+        g_print ("Got proxy....\n");
+        TestGGO63Data *d = (TestGGO63Data *) user_data;
+        d->p = g_object_ref (p);
+
+        g_main_loop_quit (d->loop);
+}
+
+void
+on_ping (GObject *object, GAsyncResult *res, gpointer user_data)
+{
+        g_print ("On PIng\n");
+
+        TestGGO63Data *d = (TestGGO63Data *) user_data;
+        GError *error = NULL;
+
+        GUPnPServiceProxyAction *action =
+                gupnp_service_proxy_call_action_finish (
+                        GUPNP_SERVICE_PROXY (object),
+                        res,
+                        &error);
+
+        g_assert_null (action);
+        g_assert_error (error, GUPNP_SERVER_ERROR, GUPNP_SERVER_ERROR_OTHER);
+
+        g_error_free (error);
+
+        g_main_loop_quit (d->loop);
+}
+
+void
+test_ggo_63 ()
+{
+        GUPnPContext *context = NULL;
+        GError *error = NULL;
+
+        context = create_context (0, &error);
+        g_assert_no_error (error);
+        g_assert (context != NULL);
+
+        SoupServer *server = gupnp_context_get_server (context);
+        GSList *uris = soup_server_get_uris (server);
+        GSSDPResourceGroup *rg =
+                gssdp_resource_group_new (GSSDP_CLIENT (context));
+
+        char *server_uri = g_uri_to_string (uris->data);
+        char *resource_path = g_strconcat (server_uri, "TestDevice.xml", NULL);
+        g_free (server_uri);
+        g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+        gssdp_resource_group_add_resource_simple (rg,
+                                                  "upnp:rootdevice",
+                                                  "uuid:1234::upnp:rootdevice",
+                                                  resource_path);
+
+        gssdp_resource_group_add_resource_simple (rg,
+                                                  "uuid:1234",
+                                                  "uuid:1234",
+                                                  resource_path);
+
+        gssdp_resource_group_add_resource_simple (
+                rg,
+                "urn:test-gupnp-org:device:TestDevice:1",
+                "uuid:1234::urn:test-gupnp-org:device:TestDevice:1",
+                resource_path);
+
+        gssdp_resource_group_add_resource_simple (
+                rg,
+                "urn:test-gupnp-org:service:TestService:1",
+                "uuid:1234::urn:test-gupnp-org:service:TestService:1",
+                resource_path);
+
+        g_free (resource_path);
+
+        gupnp_context_host_path (context,
+                                 DATA_PATH "/TestDevice.xml",
+                                 "/TestDevice.xml");
+
+        soup_server_add_handler (server,
+                                 "/TestService/Control",
+                                 on_control,
+                                 NULL,
+                                 NULL);
+
+        soup_server_add_handler (server,
+                                 "/TestService/Event",
+                                 on_event,
+                                 NULL,
+                                 NULL);
+
+        gssdp_resource_group_set_available (rg, TRUE);
+
+
+        GUPnPControlPoint *cp = gupnp_control_point_new (
+                context,
+                "urn:test-gupnp-org:service:TestService:1");
+
+        TestGGO63Data d = { .loop = g_main_loop_new (NULL, FALSE), .p = NULL };
+        g_signal_connect (G_OBJECT (cp),
+                          "service-proxy-available",
+                          G_CALLBACK (on_proxy),
+                          &d);
+
+        gssdp_resource_browser_set_active (GSSDP_RESOURCE_BROWSER (cp), TRUE);
+
+        g_main_loop_run (d.loop);
+
+        GUPnPServiceProxyAction *a =
+                gupnp_service_proxy_action_new ("Ping", NULL);
+
+        gupnp_service_proxy_call_action_async (d.p, a, NULL, on_ping, &d);
+
+        g_main_loop_run (d.loop);
+        gupnp_service_proxy_action_unref (a);
+
+        g_object_unref (d.p);
+        g_object_unref (cp);
+        g_object_unref (rg);
+        g_object_unref (context);
+
+
+        // Make sure the source teardown handlers get run so we don't confuse valgrind
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, d.loop);
+        g_main_loop_run (d.loop);
+
+        g_main_loop_unref (d.loop);
+}
+
+void
+test_ggo_60_call_ready (GObject *source, GAsyncResult *res, gpointer user_data)
+{
+        g_main_loop_quit ((GMainLoop *) user_data);
+}
+
+void
+test_ggo_60_no_crash ()
+{
+        // Test that there is no crash if not calling call_finish() on call_async()
+        GUPnPContext *context = NULL;
+        GError *error = NULL;
+        GUPnPControlPoint *cp = NULL;
+        GUPnPRootDevice *rd;
+        TestServiceProxyData data = { .proxy = NULL,
+                                      .loop = g_main_loop_new (NULL, FALSE) };
+
+        context = create_context (0, &error);
+        g_assert_no_error (error);
+        g_assert (context != NULL);
+
+        cp = gupnp_control_point_new (
+                context,
+                "urn:test-gupnp-org:service:TestService:1");
+
+        gssdp_resource_browser_set_active (GSSDP_RESOURCE_BROWSER (cp), TRUE);
+
+        g_signal_connect (G_OBJECT (cp),
+                          "service-proxy-available",
+                          G_CALLBACK (test_on_sp_available),
+                          &data);
+
+
+        rd = gupnp_root_device_new (context,
+                                    "TestDevice.xml",
+                                    DATA_PATH,
+                                    &error);
+        g_assert_no_error (error);
+        g_assert (rd != NULL);
+        gupnp_root_device_set_available (rd, TRUE);
+        test_run_loop (data.loop, g_test_get_path ());
+        g_assert (data.proxy != NULL);
+
+        // We just use the default of "Action not implemented" response, since
+        // it does not matter for the actual test
+
+        GUPnPServiceProxyAction *action =
+                gupnp_service_proxy_action_new ("Ping", NULL);
+        gupnp_service_proxy_call_action_async (data.proxy,
+                                               action,
+                                               NULL,
+                                               test_ggo_60_call_ready,
+                                               data.loop);
+
+        test_run_loop (data.loop, g_test_get_path());
+        gupnp_service_proxy_action_unref (action);
+        g_object_unref (data.proxy);
+        g_object_unref (rd);
+        g_object_unref (cp);
+        g_object_unref (context);
+
+        // Make sure the source teardown handlers get run so we don't confuse valgrind
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, data.loop);
+        g_main_loop_run (data.loop);
+
+        g_main_loop_unref (data.loop);
+}
+
+void
+test_ggo_81 ()
+{
+        GInetAddress *address =
+                g_inet_address_new_loopback (G_SOCKET_FAMILY_IPV4);
+        GError *error = NULL;
+
+        GUPnPContext *context =
+                gupnp_context_new_for_address (address,
+                                               4711,
+                                               GSSDP_UDA_VERSION_1_0,
+                                               &error);
+        g_assert_nonnull (context);
+        g_assert_no_error (error);
+        g_assert_cmpint (4711, ==, gupnp_context_get_port (context));
+        g_assert_cmpint (4711,
+                         ==,
+                         gssdp_client_get_port (GSSDP_CLIENT (context)));
+
+        guint port = 0;
+        g_object_get (context, "port", &port, NULL);
+        g_assert_cmpint (4711, ==, port);
+
+        g_object_unref (context);
+
+        context = gupnp_context_new_for_address (address,
+                                                 0,
+                                                 GSSDP_UDA_VERSION_1_0,
+                                                 &error);
+
+        g_assert_nonnull (context);
+        g_assert_no_error (error);
+        port = gupnp_context_get_port (context);
+        g_assert_cmpint (0, !=, port);
+
+        guint port2 = 0;
+        g_object_get (context, "port", &port2, NULL);
+        g_assert_cmpint (port, ==, port2);
+
+        g_assert_cmpint (port2,
+                         ==,
+                         gssdp_client_get_port (GSSDP_CLIENT (context)));
+
+        g_object_unref (context);
+        g_object_unref (address);
+}
 int
 main (int argc, char *argv[]) {
     g_test_init (&argc, &argv, NULL);
@@ -532,6 +914,10 @@ main (int argc, char *argv[]) {
     g_test_add_func ("/bugs/bgo/722696", test_bgo_722696);
     g_test_add_func ("/bugs/bgo/743233", test_bgo_743233);
     g_test_add_func ("/bugs/ggo/24", test_ggo_24);
+    g_test_add_func ("/bugs/ggo/42", test_ggo_42);
+    g_test_add_func ("/bugs/ggo/63", test_ggo_63);
+    g_test_add_func ("/bugs/ggo/60", test_ggo_60_no_crash);
+    g_test_add_func ("/bugs/ggo/81", test_ggo_81);
 
     return g_test_run ();
 }

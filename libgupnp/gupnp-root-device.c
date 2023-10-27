@@ -7,21 +7,17 @@
  *
  */
 
-/**
- * SECTION:gupnp-root-device
- * @short_description: Class for root device implementations.
- *
- * #GUPnPRootDevice allows for implementing root devices.
- */
+#define G_LOG_DOMAIN "gupnp-root-device"
 
 #include <config.h>
 #include <string.h>
 
 #include <libgssdp/gssdp-resource-group.h>
 
-#include "gupnp-root-device.h"
 #include "gupnp-context-private.h"
+#include "gupnp-device-info-private.h"
 #include "gupnp-error.h"
+#include "gupnp-root-device.h"
 #include "http-headers.h"
 #include "xml-util.h"
 
@@ -35,8 +31,6 @@ gupnp_root_device_initable_init (GInitable     *initable,
                                  GError       **error);
 
 struct _GUPnPRootDevicePrivate {
-        GUPnPXMLDoc *description_doc;
-
         GSSDPResourceGroup *group;
 
         char  *description_path;
@@ -45,6 +39,13 @@ struct _GUPnPRootDevicePrivate {
 };
 typedef struct _GUPnPRootDevicePrivate GUPnPRootDevicePrivate;
 
+/**
+ * GUPnPRootDevice:
+ *
+ * Implementation of an UPnP root device.
+ *
+ * #GUPnPRootDevice allows for implementing root devices.
+ */
 G_DEFINE_TYPE_EXTENDED (GUPnPRootDevice,
                         gupnp_root_device,
                         GUPNP_TYPE_DEVICE,
@@ -56,7 +57,6 @@ G_DEFINE_TYPE_EXTENDED (GUPnPRootDevice,
 
 enum {
         PROP_0,
-        PROP_DESCRIPTION_DOC,
         PROP_DESCRIPTION_PATH,
         PROP_DESCRIPTION_DIR,
         PROP_AVAILABLE
@@ -72,7 +72,6 @@ gupnp_root_device_finalize (GObject *object)
         device = GUPNP_ROOT_DEVICE (object);
         priv = gupnp_root_device_get_instance_private (device);
 
-        g_clear_object (&priv->description_doc);
         g_free (priv->description_path);
         g_free (priv->description_dir);
         g_free (priv->relative_location);
@@ -92,10 +91,7 @@ gupnp_root_device_dispose (GObject *object)
         device = GUPNP_ROOT_DEVICE (object);
         priv = gupnp_root_device_get_instance_private (device);
 
-        if (priv->group) {
-                g_object_unref (priv->group);
-                priv->group = NULL;
-        }
+        g_clear_object (&priv->group);
 
         /* Call super */
         object_class = G_OBJECT_CLASS (gupnp_root_device_parent_class);
@@ -128,9 +124,6 @@ gupnp_root_device_set_property (GObject      *object,
         priv = gupnp_root_device_get_instance_private (device);
 
         switch (property_id) {
-        case PROP_DESCRIPTION_DOC:
-                priv->description_doc = g_value_dup_object (value);
-                break;
         case PROP_DESCRIPTION_PATH:
                 priv->description_path = g_value_dup_string (value);
                 break;
@@ -288,10 +281,10 @@ gupnp_root_device_initable_init (GInitable     *initable,
         GUPnPRootDevice *device;
         GUPnPContext *context;
         const char *udn;
-        SoupURI *uri;
+        GUri *uri;
         char *desc_path, *location, *usn, *relative_location;
         xmlNode *root_element, *element;
-        SoupURI *url_base;
+        GUri *url_base;
         gboolean result = FALSE;
         GUPnPRootDevicePrivate *priv;
 
@@ -345,25 +338,29 @@ gupnp_root_device_initable_init (GInitable     *initable,
                                               priv->description_path,
                                               NULL);
 
+        GUPnPXMLDoc *description_doc =
+                _gupnp_device_info_get_document (GUPNP_DEVICE_INFO (device));
         /* Check whether we have a parsed description document */
-        if (priv->description_doc == NULL) {
+        if (description_doc == NULL) {
                 /* We don't, so load and parse it */
-                priv->description_doc = load_and_parse (desc_path);
-                if (priv->description_doc == NULL) {
+                description_doc = load_and_parse (desc_path);
+                if (description_doc == NULL) {
                         g_set_error_literal (error,
                                              GUPNP_XML_ERROR,
                                              GUPNP_XML_ERROR_PARSE,
-                                             "Coupld not parse description document");
+                                             "Could not parse description document");
 
                         goto DONE;
                 }
+        } else {
+                g_object_ref (description_doc);
         }
 
         /* Find correct element */
-        root_element = xml_util_get_element ((xmlNode *)
-                                             gupnp_xml_doc_get_doc (priv->description_doc),
-                                             "root",
-                                             NULL);
+        root_element = xml_util_get_element (
+                (xmlNode *) gupnp_xml_doc_get_doc (description_doc),
+                "root",
+                NULL);
         if (!root_element) {
                 g_set_error_literal (error,
                                      GUPNP_XML_ERROR,
@@ -401,14 +398,15 @@ gupnp_root_device_initable_init (GInitable     *initable,
                                        priv->relative_location,
                                        NULL);
 
-        /* Host the description file and dir */
+        /* Host the description file and folder */
         gupnp_context_host_path (context, desc_path, relative_location);
         gupnp_context_host_path (context, priv->description_dir, "");
 
         /* Generate full location */
-        soup_uri_set_path (uri, relative_location);
-        location = soup_uri_to_string (uri, FALSE);
-
+        GUri *new_uri =
+                soup_uri_copy (uri, SOUP_URI_PATH, relative_location, NULL);
+        location = g_uri_to_string_partial (new_uri, G_URI_HIDE_PASSWORD);
+        g_uri_unref (new_uri);
         g_free (relative_location);
 
         /* Save the URL base, if any */
@@ -416,15 +414,18 @@ gupnp_root_device_initable_init (GInitable     *initable,
                                                            "URLBase",
                                                            NULL);
         if (!url_base)
-                url_base = soup_uri_new (location);
+                url_base = g_uri_parse (location, G_URI_FLAGS_NONE, NULL);
 
         /* Set additional properties */
         g_object_set (G_OBJECT (device),
-                      "location", location,
-                      "url-base", url_base,
+                      "location",
+                      location,
+                      "url-base",
+                      url_base,
+                      "document",
+                      description_doc,
                       NULL);
-
-        soup_uri_free (url_base);
+        g_uri_unref (url_base);
 
         /* Create resource group */
         priv->group = gssdp_resource_group_new (GSSDP_CLIENT (context));
@@ -444,7 +445,9 @@ gupnp_root_device_initable_init (GInitable     *initable,
  DONE:
         /* Cleanup */
         if (uri)
-                soup_uri_free (uri);
+                g_uri_unref (uri);
+
+        g_clear_object (&description_doc);
 
         g_free (desc_path);
         g_free (location);
@@ -465,27 +468,7 @@ gupnp_root_device_class_init (GUPnPRootDeviceClass *klass)
         object_class->finalize     = gupnp_root_device_finalize;
 
         /**
-         * GUPnPRootDevice:description-doc:
-         *
-         * Device description document. Constructor property.
-         *
-         * Since: 0.14.0
-         **/
-        g_object_class_install_property
-                (object_class,
-                 PROP_DESCRIPTION_DOC,
-                 g_param_spec_object ("description-doc",
-                                      "Description document",
-                                      "Device description document",
-                                      GUPNP_TYPE_XML_DOC,
-                                      G_PARAM_WRITABLE |
-                                      G_PARAM_CONSTRUCT_ONLY |
-                                      G_PARAM_STATIC_NAME |
-                                      G_PARAM_STATIC_NICK |
-                                      G_PARAM_STATIC_BLURB));
-
-        /**
-         * GUPnPRootDevice:description-path:
+         * GUPnPRootDevice:description-path:(attributes org.gtk.Property.get=gupnp_root_device_get_description_path)
          *
          * The path to device description document. This could either be an
          * absolute path or path relative to GUPnPRootDevice:description-dir.
@@ -497,7 +480,7 @@ gupnp_root_device_class_init (GUPnPRootDeviceClass *klass)
                  PROP_DESCRIPTION_PATH,
                  g_param_spec_string ("description-path",
                                       "Description Path",
-                                      "The path to device descrition document",
+                                      "The path to device description document",
                                       NULL,
                                       G_PARAM_READWRITE |
                                       G_PARAM_CONSTRUCT_ONLY |
@@ -506,9 +489,9 @@ gupnp_root_device_class_init (GUPnPRootDeviceClass *klass)
                                       G_PARAM_STATIC_BLURB));
 
         /**
-         * GUPnPRootDevice:description-dir:
+         * GUPnPRootDevice:description-dir:(attributes org.gtk.Property.get=gupnp_root_device_get_description_dir)
          *
-         * The path to directory where description documents are provided.
+         * The path to a folder where description documents are provided.
          **/
         g_object_class_install_property
                 (object_class,
@@ -525,7 +508,7 @@ gupnp_root_device_class_init (GUPnPRootDeviceClass *klass)
                                       G_PARAM_STATIC_BLURB));
 
         /**
-         * GUPnPRootDevice:available:
+         * GUPnPRootDevice:available:(attributes org.gtk.Property.get=gupnp_root_device_get_available org.gtk.Property.set=gupnp_root_device_set_available)
          *
          * TRUE if this device is available.
          **/
@@ -546,8 +529,8 @@ gupnp_root_device_class_init (GUPnPRootDeviceClass *klass)
  * gupnp_root_device_new:
  * @context: The #GUPnPContext
  * @description_path: Path to device description document. This could either
- * be an absolute path or path relative to @description_dir.
- * @description_dir: Path to directory where description documents are provided.
+ * be an absolute path or path relative to @description_folder.
+ * @description_folder: Path to directory where description documents are provided.
  * @error: (inout)(optional)(nullable): The location for a #GError to report issue with
  * creation on or %NULL.
  *
@@ -559,7 +542,7 @@ gupnp_root_device_class_init (GUPnPRootDeviceClass *klass)
 GUPnPRootDevice *
 gupnp_root_device_new (GUPnPContext *context,
                        const char   *description_path,
-                       const char   *description_dir,
+                       const char   *description_folder,
                        GError      **error)
 {
         GUPnPResourceFactory *factory;
@@ -570,7 +553,7 @@ gupnp_root_device_new (GUPnPContext *context,
                                            factory,
                                            NULL,
                                            description_path,
-                                           description_dir,
+                                           description_folder,
                                            error);
 }
 
@@ -581,7 +564,7 @@ gupnp_root_device_new (GUPnPContext *context,
  * @description_doc: Device description document, or %NULL
  * @description_path: Path to device description document. This could either
  * be an absolute path or path relative to @description_dir.
- * @description_dir: Path to directory where description documents are provided.
+ * @description_folder: Path to folder where description documents are provided.
  * @error: (inout)(optional)(nullable): The location for a #GError to report issue with
  * creation on or %NULL.
  *
@@ -596,7 +579,7 @@ gupnp_root_device_new_full (GUPnPContext         *context,
                             GUPnPResourceFactory *factory,
                             GUPnPXMLDoc          *description_doc,
                             const char           *description_path,
-                            const char           *description_dir,
+                            const char           *description_folder,
                             GError              **error)
 {
         g_return_val_if_fail (GUPNP_IS_CONTEXT (context), NULL);
@@ -605,21 +588,27 @@ gupnp_root_device_new_full (GUPnPContext         *context,
         return g_initable_new (GUPNP_TYPE_ROOT_DEVICE,
                                NULL,
                                error,
-                               "context", context,
-                               "resource-factory", factory,
-                               "root-device", NULL,
-                               "description-doc", description_doc,
-                               "description-path", description_path,
-                               "description-dir", description_dir,
+                               "context",
+                               context,
+                               "resource-factory",
+                               factory,
+                               "root-device",
+                               NULL,
+                               "document",
+                               description_doc,
+                               "description-path",
+                               description_path,
+                               "description-dir",
+                               description_folder,
                                NULL);
 }
 
 /**
- * gupnp_root_device_set_available:
+ * gupnp_root_device_set_available:(attributes org.gtk.Method.get_property=available)
  * @root_device: A #GUPnPRootDevice
  * @available: %TRUE if @root_device should be available
  *
- * Controls whether or not @root_device is available (announcing
+ * Sets the availability of @root_device on the network (announcing
  * its presence).
  **/
 void
@@ -638,10 +627,10 @@ gupnp_root_device_set_available (GUPnPRootDevice *root_device,
 }
 
 /**
- * gupnp_root_device_get_available:
+ * gupnp_root_device_get_available:(attributes org.gtk.Method.get_property=available)
  * @root_device: A #GUPnPRootDevice
  *
- * Get whether or not @root_device is available (announcing its presence).
+ * Checks whether @root_device is available on the network (announcing its presence).
  *
  * Return value: %TRUE if @root_device is available, %FALSE otherwise.
  **/
@@ -658,15 +647,15 @@ gupnp_root_device_get_available (GUPnPRootDevice *root_device)
 }
 
 /**
- * gupnp_root_device_get_relative_location:
+ * gupnp_root_device_get_description_document_name:
  * @root_device: A #GUPnPRootDevice
  *
- * Get the relative location of @root_device.
+ * Gets the name of the description document as hosted via HTTP.
  *
  * Return value: The relative location of @root_device.
  **/
 const char *
-gupnp_root_device_get_relative_location (GUPnPRootDevice *root_device)
+gupnp_root_device_get_description_document_name (GUPnPRootDevice *root_device)
 {
         GUPnPRootDevicePrivate *priv;
 
@@ -678,10 +667,10 @@ gupnp_root_device_get_relative_location (GUPnPRootDevice *root_device)
 }
 
 /**
- * gupnp_root_device_get_description_path:
+ * gupnp_root_device_get_description_path:(attributes org.gtk.Method.get_property=description-path)
  * @root_device: A #GUPnPRootDevice
  *
- * Get the path to the device description document of @root_device.
+ * Gets the path to the device description document of @root_device.
  *
  * Return value: The path to device description document of @root_device.
  **/
@@ -698,10 +687,10 @@ gupnp_root_device_get_description_path (GUPnPRootDevice *root_device)
 }
 
 /**
- * gupnp_root_device_get_description_dir:
+ * gupnp_root_device_get_description_dir:(attributes org.gtk.Method.get_property=description-dir)
  * @root_device: A #GUPnPRootDevice
  *
- * Get the path to the directory containing description documents related to
+ * Gets the path to the directory containing description documents related to
  * @root_device.
  *
  * Return value: The path to description document directory of @root_device.
@@ -722,7 +711,7 @@ gupnp_root_device_get_description_dir (GUPnPRootDevice *root_device)
  * gupnp_root_device_get_ssdp_resource_group:
  * @root_device: A #GUPnPRootDevice
  *
- * Get the #GSSDPResourceGroup used by @root_device.
+ * Gets the #GSSDPResourceGroup used by @root_device.
  *
  * Returns: (transfer none): The #GSSDPResourceGroup of @root_device.
  *

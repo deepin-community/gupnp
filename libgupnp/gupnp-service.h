@@ -9,8 +9,6 @@
 #ifndef GUPNP_SERVICE_H
 #define GUPNP_SERVICE_H
 
-#include <stdarg.h>
-
 #include "gupnp-service-info.h"
 
 G_BEGIN_DECLS
@@ -69,10 +67,6 @@ void
 gupnp_service_action_get          (GUPnPServiceAction *action,
                                    ...) G_GNUC_NULL_TERMINATED;
 
-void
-gupnp_service_action_get_valist   (GUPnPServiceAction *action,
-                                   va_list             var_args);
-
 GList *
 gupnp_service_action_get_values (GUPnPServiceAction *action,
                                  GList              *arg_names,
@@ -93,10 +87,6 @@ gupnp_service_action_set          (GUPnPServiceAction *action,
                                    ...) G_GNUC_NULL_TERMINATED;
 
 void
-gupnp_service_action_set_valist   (GUPnPServiceAction *action,
-                                   va_list             var_args);
-
-void
 gupnp_service_action_set_values   (GUPnPServiceAction *action,
                                    GList              *arg_names,
                                    GList              *arg_values);
@@ -107,15 +97,15 @@ gupnp_service_action_set_value    (GUPnPServiceAction *action,
                                    const GValue       *value);
 
 void
-gupnp_service_action_return       (GUPnPServiceAction *action);
+gupnp_service_action_return_success (GUPnPServiceAction *action);
 
 void
 gupnp_service_action_return_error (GUPnPServiceAction *action,
                                    guint               error_code,
                                    const char         *error_description);
 
-SoupMessage *
-gupnp_service_action_get_message  (GUPnPServiceAction *action);
+SoupServerMessage *
+gupnp_service_action_get_message (GUPnPServiceAction *action);
 
 guint
 gupnp_service_action_get_argument_count
@@ -124,10 +114,6 @@ gupnp_service_action_get_argument_count
 void
 gupnp_service_notify              (GUPnPService *service,
                                    ...) G_GNUC_NULL_TERMINATED;
-
-void
-gupnp_service_notify_valist       (GUPnPService *service,
-                                   va_list       var_args);
 
 void
 gupnp_service_notify_value        (GUPnPService *service,
@@ -144,6 +130,20 @@ void
 gupnp_service_signals_autoconnect (GUPnPService *service,
                                    gpointer      user_data,
                                    GError      **error);
+
+void
+gupnp_service_action_invoked (GUPnPService *service,
+                              GUPnPServiceAction *action);
+
+void
+gupnp_service_query_variable (GUPnPService *service,
+                              const char *variable,
+                              GValue *value);
+
+void
+gupnp_service_notify_failed (GUPnPService *service,
+                             const GList *callback_urls,
+                             const GError *reason);
 
 G_END_DECLS
 

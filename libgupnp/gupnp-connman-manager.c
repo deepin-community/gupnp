@@ -54,6 +54,11 @@ struct _GUPnPConnmanManagerPrivate {
 
 typedef struct _GUPnPConnmanManagerPrivate GUPnPConnmanManagerPrivate;
 
+/**
+ * GUPnPConnmanManager:
+ *
+ * Connman-based implementation of a [class@GUPnP.ContextManager]
+ */
 struct _GUPnPConnmanManager {
         GUPnPContextManager             parent;
 };
@@ -88,22 +93,63 @@ loopback_context_create (gpointer data)
 
         g_object_get (manager, "port", &port, NULL);
 
-        context = g_initable_new (GUPNP_TYPE_CONTEXT,
-                                  NULL,
-                                  &error,
-                                  "interface", LOOPBACK_IFACE,
-                                  "port", port,
-                                  NULL);
+        GSocketFamily family = gupnp_context_manager_get_socket_family (
+                GUPNP_CONTEXT_MANAGER (manager));
 
-        if (error != NULL) {
-                g_warning ("Error creating GUPnP context: %s", error->message);
-                g_error_free (error);
+        if (family == G_SOCKET_FAMILY_INVALID ||
+            family == G_SOCKET_FAMILY_IPV4) {
+                GInetAddress *addr =
+                        g_inet_address_new_loopback (G_SOCKET_FAMILY_IPV4);
 
-                return FALSE;
+                context = g_initable_new (GUPNP_TYPE_CONTEXT,
+                                          NULL,
+                                          &error,
+                                          "address",
+                                          addr,
+                                          "port",
+                                          port,
+                                          NULL);
+                if (error) {
+                        g_warning ("Error creating GUPnP context: %s\n",
+                                   error->message);
+
+                        g_clear_error (&error);
+                } else {
+                        g_signal_emit_by_name (manager,
+                                               "context-available",
+                                               context);
+                }
+
+                g_object_unref (context);
+                g_object_unref (addr);
         }
 
-        g_signal_emit_by_name (manager, "context-available", context);
-        g_object_unref (context);
+        if (family == G_SOCKET_FAMILY_INVALID ||
+            family == G_SOCKET_FAMILY_IPV6) {
+                GInetAddress *addr =
+                        g_inet_address_new_loopback (G_SOCKET_FAMILY_IPV6);
+                context = g_initable_new (GUPNP_TYPE_CONTEXT,
+                                          NULL,
+                                          &error,
+                                          "address",
+                                          addr,
+                                          "port",
+                                          port,
+                                          NULL);
+                if (error) {
+                        g_warning ("Error creating GUPnP context: %s\n",
+                                   error->message);
+
+                        g_clear_error (&error);
+                } else {
+                        g_signal_emit_by_name (manager,
+                                               "context-available",
+                                               context);
+                }
+
+                g_object_unref (context);
+                g_object_unref (addr);
+        }
 
         return FALSE;
 }
@@ -113,13 +159,20 @@ service_context_create (CMService *cm_service)
 {
         GError  *error = NULL;
 
-        cm_service->context = g_initable_new (GUPNP_TYPE_CONTEXT,
-                                              NULL,
-                                              &error,
-                                              "interface", cm_service->iface,
-                                              "network", cm_service->name,
-                                              "port", cm_service->port,
-                                              NULL);
+        cm_service->context = g_initable_new (
+                GUPNP_TYPE_CONTEXT,
+                NULL,
+                &error,
+                "interface",
+                cm_service->iface,
+                "network",
+                cm_service->name,
+                "port",
+                cm_service->port,
+                "address-family",
+                gupnp_context_manager_get_socket_family (
+                        GUPNP_CONTEXT_MANAGER (cm_service->manager)),
+                NULL);
 
         if (error != NULL) {
                 g_warning ("Error creating GUPnP context: %s", error->message);

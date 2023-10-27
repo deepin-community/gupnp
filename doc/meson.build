@@ -1,41 +1,61 @@
 entities = configuration_data()
 entities.set('VERSION', meson.project_version())
+
 version_xml = configure_file(input: 'version.xml.in',
                output: 'version.xml', configuration:
                entities)
 
+docbook_man_page = configure_file(
+  input: 'gupnp-binding-tool.xml.in',
+  output: 'gupnp-binding-tool.xml',
+  configuration: api_config,
+  install: false
+)
+
 if get_option('gtk_doc')
-    gnome.gtkdoc('gupnp',
-             content_files : files(
-                'client-tutorial.xml',
-                'fdl-1.1.xml',
-                'glossary.xml',
-                'gupnp-binding-tool.xml',
-                'gupnp-docs.xml',
-                'overview.xml',
-                'server-tutorial.xml'
-             ),
-             main_xml : 'gupnp-docs.xml',
-             src_dir : ['libgupnp'],
-             dependencies : libgupnp,
-             scan_args : ['--ignore-decorators', 'G_DEPRECATED|G_GNUC_DEPRECATED,G_DEPRECATED_FOR'],
-             ignore_headers : [
-                 'gena-protocol.h',
-                 'xml-util.h',
-                 'gvalue-util.h',
-                 'http-headers.h',
-                 'gupnp-context-private.h',
-                 'gupnp-linux-context-manager.h',
-                 'gupnp-network-manager.h',
-                 'gupnp-unix-context-manager.h',
-                 'gupnp-device-info-private.h',
-                 'gupnp-error-private.h',
-                 'gupnp-resource-factory-private.h',
-                 'gupnp-service-introspection-private.h',
-                 'gupnp-service-proxy-action-private.h',
-                 'gupnp-types-private.h'
-             ],
-             install : true)
+  gidocgen = find_program('gi-docgen', required: true)
+
+  gupnp_toml = configure_file (
+      input: 'gupnp.toml.in',
+      output: 'gupnp.toml',
+      configuration: entities
+  )
+
+  docs_dir = join_paths(get_option('prefix'), get_option('datadir'), 'doc')
+
+  if gssdp_dep.type_name() == 'internal'
+    gssdp_gir_dirs = subproject('gssdp-1.6').get_variable('gssdp_gir_dir')
+  else
+    gssdp_gir_dirs = ''
+  endif
+
+  custom_target(
+      'gupnp-doc',
+      input: [ gupnp_toml, gir[0] ],
+      output: GUPNP_API_NAME,
+      command : [
+          gidocgen,
+          'generate',
+          '--quiet',
+          '--add-include-path=@0@'.format(meson.current_build_dir() / '../libgupnp'),
+          '--add-include-path=@0@'.format(gssdp_gir_dirs),
+          '--config', gupnp_toml,
+          '--output-dir=@OUTPUT@',
+          '--no-namespace-dir',
+          '--content-dir=@0@'.format(meson.current_source_dir()),
+          '@INPUT1@',
+      ],
+      depend_files : [
+          gupnp_toml,
+          'client-tutorial.md',
+          'server-tutorial.md',
+          'choosing-a-context-manager.md',
+          'glossary.md',
+      ],
+      build_by_default: true,
+      install: true,
+      install_dir : docs_dir,
+  )
 endif
 
 xsltproc = find_program('xsltproc', required: false)
@@ -67,15 +87,15 @@ if xsltproc.found()
             xlstproc_flags,
             '--noout',
             stylesheet,
-            'gupnp-binding-tool.xml'
+            docbook_man_page
         ]
     )
     if (stylesheet_check.returncode() == 0)
         message('Stylesheet ' + stylesheet + ' available')
         custom_target(
             'man 1 pages',
-            input: 'gupnp-binding-tool.xml',
-            output: 'gupnp-binding-tool-1.2.1',
+            input: docbook_man_page,
+            output: 'gupnp-binding-tool-@0@.1'.format(GUPNP_API_VERSION),
             command: xsltproc_args,
             depend_files : version_xml,
             install: true,

@@ -4,7 +4,6 @@ Acl
     .is_allowed_finish skip
 DeviceInfo
     .element skip
-    .document skip
 Service
     .notify skip=false
     .signals_autoconnect skip
@@ -19,9 +18,3 @@ ServiceIntrospection
     .scpd skip
 ServiceProxy
     .add_notify skip=false
-    .begin_action skip=false
-    .end_action_hash skip
-    .end_action_list skip
-    .send_action_list skip
-XMLDoc
-    .new skip

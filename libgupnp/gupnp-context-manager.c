@@ -11,17 +11,6 @@
  *
  */
 
-/**
- * SECTION:gupnp-context-manager
- * @short_description: Manages GUPnPContext objects.
- *
- * A Utility class that takes care of creation and destruction of
- * #GUPnPContext objects for all available network interfaces as they go up
- * (connect) and down (disconnect), respectively.
- *
- * Since: 0.13.0
- */
-
 #define G_LOG_DOMAIN "gupnp-context-manager"
 
 #include <config.h>
@@ -29,7 +18,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <libsoup/soup-address.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 
@@ -59,13 +47,36 @@ struct _GUPnPContextManagerPrivate {
 
         GUPnPContextManager *impl;
 
-        GList *objects; /* control points and root devices */
+        GPtrArray *control_points;
+        GPtrArray *root_devices;
+
         GList *filtered; /* Filtered contexts */
 
+        // map of context -> managed objects, doubles also as a set of seen contexts
+        GHashTable *contexts;
+
         GUPnPContextFilter *context_filter;
+        gboolean syntesized_internal;
 };
 typedef struct _GUPnPContextManagerPrivate GUPnPContextManagerPrivate;
 
+/**
+ * GUPnPContextManager:
+ *
+ * A manager for [class@GUPnP.Context] instances.
+ *
+ * This utility class that takes care of dynamic creation and destruction of
+ * #GUPnPContext objects for all available network interfaces as they go up
+ * (connect) and down (disconnect), respectively.
+ *
+ * The final implementation depends either on the underlying operating system
+ * or can configured during compile time.
+ *
+ * It also provides a simple filtering facility if required. See [method@GUPnP.ContextManager.get_context_filter] and
+ * [class@GUPnP.ContextFilter] for details.
+ *
+ * Since: 0.14.0
+ */
 G_DEFINE_ABSTRACT_TYPE_WITH_PRIVATE (GUPnPContextManager,
                                      gupnp_context_manager,
                                      G_TYPE_OBJECT)
@@ -87,9 +98,10 @@ enum {
 
 static guint signals[SIGNAL_LAST];
 
-static gint32
-handle_update (GUPnPRootDevice *root_device)
+static void
+handle_update (GUPnPRootDevice *root_device, gpointer user_data)
 {
+        gint32 *output = user_data;
         gint32 boot_id;
         GSSDPResourceGroup *group = NULL;
         GSSDPClient *client = NULL;
@@ -99,7 +111,48 @@ handle_update (GUPnPRootDevice *root_device)
         g_object_get (G_OBJECT (client), "boot-id", &boot_id, NULL);
         gssdp_resource_group_update (group, ++boot_id);
 
-        return boot_id;
+        *output = boot_id;
+}
+
+static gboolean
+context_filtered (GUPnPContextFilter *filter, GUPnPContext *context)
+{
+        return !gupnp_context_filter_is_empty (filter) &&
+               gupnp_context_filter_get_enabled (filter) &&
+               !gupnp_context_filter_check_context (filter, context);
+}
+
+static GPtrArray *
+ensure_context (GHashTable *contexts, GUPnPContext *context)
+{
+        GPtrArray *objects = g_hash_table_lookup (contexts, context);
+        if (objects == NULL) {
+                objects = g_ptr_array_new_with_free_func (g_object_unref);
+                g_hash_table_insert (contexts, g_object_ref (context), objects);
+        }
+
+        return objects;
+}
+
+static void
+do_boot_id_update_for_root_devices (GUPnPContextManager *manager)
+{
+        GUPnPContextManagerPrivate *priv;
+        priv = gupnp_context_manager_get_instance_private (manager);
+
+        // Nothing to do for UDA 1.0. It does not have the boot-id
+        // concept
+        if (priv->uda_version == GSSDP_UDA_VERSION_1_0) {
+                return;
+        }
+
+        gint32 boot_id = -1;
+        g_ptr_array_foreach (priv->root_devices,
+                             (GFunc) handle_update,
+                             &boot_id);
+        if (boot_id > 1) {
+                priv->boot_id = boot_id;
+        }
 }
 
 static void
@@ -107,53 +160,30 @@ on_context_available (GUPnPContextManager    *manager,
                       GUPnPContext           *context,
                       G_GNUC_UNUSED gpointer *user_data)
 {
-        GUPnPContextFilter *context_filter;
         GUPnPContextManagerPrivate *priv;
-        gboolean enabled = TRUE;
-
         priv = gupnp_context_manager_get_instance_private (manager);
 
-        context_filter = priv->context_filter;
+        if (priv->syntesized_internal)
+                return;
 
-        /* Try to catch the notification, only if the context filter
-         * is enabled, not empty and the context doesn't match */
-        if (!gupnp_context_filter_is_empty (context_filter) &&
-            gupnp_context_filter_get_enabled (context_filter) &&
-            !gupnp_context_filter_check_context (context_filter, context)) {
+        ensure_context (priv->contexts, context);
+
+        if (context_filtered (priv->context_filter, context)) {
                 /* If the context doesn't match, block the notification
                  * and disable the context */
                 g_signal_stop_emission_by_name (manager, "context-available");
 
                 /* Make sure we don't send anything on now blocked network */
                 g_object_set (context, "active", FALSE, NULL);
-                enabled = FALSE;
 
                 /* Save it in case we need to re-enable it */
                 priv->filtered =
                         g_list_prepend (priv->filtered, g_object_ref (context));
-        }
 
-        /* Ignore the boot-id handling for UDA 1.0 */
-        if (priv->uda_version == GSSDP_UDA_VERSION_1_0)
                 return;
-
-        if (enabled) {
-                /* We have a new context, so we need to send ssdp:update and
-                 * re-announce on the old clients */
-                GList *l = priv->objects;
-                gint32 boot_id = -1;
-
-                while (l) {
-                        if (GUPNP_IS_ROOT_DEVICE (l->data)) {
-                                boot_id = handle_update (GUPNP_ROOT_DEVICE (l->data));
-                        }
-                        l = l->next;
-                }
-
-                if (boot_id > -1) {
-                        priv->boot_id = boot_id;
-                }
         }
+
+        do_boot_id_update_for_root_devices (manager);
 
         /* The new client gets the current boot-id */
         gssdp_client_set_boot_id (GSSDP_CLIENT (context), priv->boot_id);
@@ -164,163 +194,33 @@ on_context_unavailable (GUPnPContextManager    *manager,
                         GUPnPContext           *context,
                         G_GNUC_UNUSED gpointer *user_data)
 {
-        GList *l;
-        GList *filtered_context;
         GUPnPContextManagerPrivate *priv;
-
         priv = gupnp_context_manager_get_instance_private (manager);
+
+        if (priv->syntesized_internal)
+                return;
 
         /* Make sure we don't send anything on now unavailable network */
         g_object_set (context, "active", FALSE, NULL);
 
-        /* Unref all associated objects */
-        l = priv->objects;
-
-        while (l) {
-                GUPnPContext *obj_context = NULL;
-
-                if (GUPNP_IS_CONTROL_POINT (l->data)) {
-                        GUPnPControlPoint *cp;
-
-                        cp = GUPNP_CONTROL_POINT (l->data);
-                        obj_context = gupnp_control_point_get_context (cp);
-                } else if (GUPNP_IS_ROOT_DEVICE (l->data)) {
-                        GUPnPDeviceInfo *info;
-
-                        info = GUPNP_DEVICE_INFO (l->data);
-                        obj_context = gupnp_device_info_get_context (info);
-                } else {
-                        g_assert_not_reached ();
-                }
-
-                if (context == obj_context) {
-                        GList *next = l->next;
-
-                        g_object_unref (l->data);
-
-                        priv->objects = g_list_delete_link (priv->objects,
-                                                            l);
-                        l = next;
-                } else {
-                        l = l->next;
-                }
-        }
-
-        filtered_context = g_list_find (priv->filtered, context);
-
-        if (filtered_context != NULL) {
+        GList *ctx = g_list_find (priv->filtered, context);
+        if (ctx != NULL) {
                 g_signal_stop_emission_by_name (manager, "context-unavailable");
 
-                g_object_unref (filtered_context->data);
-                priv->filtered =
-                        g_list_delete_link (priv->filtered, filtered_context);
-        } else {
-                /* When UDA 1.0, ignore boot-id handling */
-                if (priv->uda_version == GSSDP_UDA_VERSION_1_0) {
-                        return;
-                }
-                /* We have lost a context, so we need to send ssdp:update and
-                 * re-announce on the old clients */
-                GList *l = priv->objects;
-                gint32 boot_id = -1;
-
-                while (l) {
-                        if (GUPNP_IS_ROOT_DEVICE (l->data)) {
-                                boot_id = handle_update (GUPNP_ROOT_DEVICE (l->data));
-                        }
-                        l = l->next;
-                }
-
-                if (boot_id > -1) {
-                        gssdp_client_set_boot_id (GSSDP_CLIENT (context), boot_id);
-                        priv->boot_id = boot_id;
-                }
-        }
-}
-
-static void
-gupnp_context_manager_filter_context (GUPnPContextFilter *context_filter,
-                                      GUPnPContextManager *manager,
-                                      gboolean check)
-{
-        GList *next;
-        GList *obj;
-        GList *iter;
-        gboolean match;
-        GUPnPContextManagerPrivate *priv;
-
-        priv = gupnp_context_manager_get_instance_private (manager);
-
-        obj = priv->objects;
-        iter = priv->filtered;
-
-        while (obj != NULL) {
-                /* If the context filter is empty, treat it as disabled */
-                if (check) {
-                        GUPnPContext *context;
-                        const char *property = "context";
-
-                        if (GUPNP_IS_CONTROL_POINT (obj->data)) {
-                                property = "client";
-                        }
-
-                        g_object_get (G_OBJECT (obj->data),
-                                      property, &context,
-                                      NULL);
-
-                        match = gupnp_context_filter_check_context (
-                                context_filter,
-                                context);
-
-                        g_object_unref (context);
-                } else {
-                        /* Re-activate all context, if needed */
-                        match = TRUE;
-                }
-
-                if (GUPNP_IS_CONTROL_POINT (obj->data)) {
-                        GSSDPResourceBrowser *browser;
-
-                        browser = GSSDP_RESOURCE_BROWSER (obj->data);
-                        gssdp_resource_browser_set_active (browser, match);
-                } else if (GUPNP_IS_ROOT_DEVICE (obj->data)) {
-                        GSSDPResourceGroup *group;
-
-                        group = GSSDP_RESOURCE_GROUP (obj->data);
-                        gssdp_resource_group_set_available (group, match);
-                } else
-                        g_assert_not_reached ();
-
-                obj = obj->next;
+                priv->filtered = g_list_remove_link (priv->filtered, ctx);
+                g_object_unref (ctx->data);
+                g_list_free (ctx);
         }
 
-        while (iter != NULL) {
-                /* If the context filter is empty, treat it as disabled */
-                if (check)
-                        /* Filter out context */
-                        match = gupnp_context_filter_check_context (
-                                context_filter,
-                                iter->data);
-                else
-                        /* Re-activate all context, if needed */
-                        match = TRUE;
+        g_hash_table_remove (priv->contexts, context);
 
-                if (!match) {
-                        iter = iter->next;
-                        continue;
-                }
+        // The context was not announced, we can just silenty leave after removing
+        // it from the list of all contexts.
+        if (ctx != NULL)
+                return;
 
-                next = iter->next;
-                g_object_set (iter->data, "active", TRUE, NULL);
-
-                g_signal_emit_by_name (manager,
-                                       "context-available",
-                                       iter->data);
-
-                g_object_unref (iter->data);
-                priv->filtered = g_list_delete_link (priv->filtered, iter);
-                iter = next;
-        }
+        // Handle the boot-id changes because of changed contexts
+        do_boot_id_update_for_root_devices (manager);
 }
 
 static void
@@ -329,16 +229,70 @@ on_context_filter_change_cb (GUPnPContextFilter *context_filter,
                              gpointer user_data)
 {
         GUPnPContextManager *manager = GUPNP_CONTEXT_MANAGER (user_data);
+        GUPnPContextManagerPrivate *priv;
         gboolean enabled;
-        gboolean is_empty;
 
+        priv = gupnp_context_manager_get_instance_private (manager);
         enabled = gupnp_context_filter_get_enabled (context_filter);
-        is_empty = gupnp_context_filter_is_empty (context_filter);
 
-        if (enabled)
-                gupnp_context_manager_filter_context (context_filter,
-                                                      manager,
-                                                      !is_empty);
+        if (!enabled) {
+                // Don't care. Nothing to do
+                return;
+        }
+
+        GHashTableIter iter;
+        g_hash_table_iter_init (&iter, priv->contexts);
+        GUPnPContext *key;
+        while (g_hash_table_iter_next (&iter, (gpointer *) &key, NULL)) {
+                GList *filtered = g_list_find (priv->filtered, key);
+
+                if (context_filtered (context_filter, key)) {
+                        // This context was already filtered. Nothing to
+                        // do
+                        if (filtered != NULL) {
+                                continue;
+                        }
+
+                        // This context is now filtered
+                        priv->filtered = g_list_prepend (priv->filtered, key);
+
+                        // Drop all references to the objects we manage
+                        g_hash_table_iter_replace (
+                                &iter,
+                                g_ptr_array_new_with_free_func (
+                                        g_object_unref));
+
+                        // Synthesize unavailable signal
+                        priv->syntesized_internal = TRUE;
+                        g_object_set (G_OBJECT (key), "active", FALSE, NULL);
+                        g_signal_emit (manager,
+                                       signals[CONTEXT_UNAVAILABLE],
+                                       0,
+                                       key);
+                        priv->syntesized_internal = FALSE;
+
+                } else {
+                        // The context is not filtered
+                        if (filtered == NULL) {
+                                // The context wasn't filtered before
+                                // -> nothing to do
+                                continue;
+                        }
+
+                        // Drop the reference from the filter list
+                        priv->filtered =
+                                g_list_delete_link (priv->filtered, filtered);
+
+                        g_object_set (G_OBJECT (key), "active", TRUE, NULL);
+
+                        priv->syntesized_internal = TRUE;
+                        g_signal_emit (manager,
+                                       signals[CONTEXT_AVAILABLE],
+                                       0,
+                                       key);
+                        priv->syntesized_internal = FALSE;
+                }
+        }
 }
 
 static void
@@ -347,16 +301,70 @@ on_context_filter_enabled_cb (GUPnPContextFilter *context_filter,
                               gpointer user_data)
 {
         GUPnPContextManager *manager = GUPNP_CONTEXT_MANAGER (user_data);
+        GUPnPContextManagerPrivate *priv;
+
         gboolean enabled;
         gboolean is_empty;
 
         enabled = gupnp_context_filter_get_enabled (context_filter);
         is_empty = gupnp_context_filter_is_empty (context_filter);
+        priv = gupnp_context_manager_get_instance_private (manager);
 
-        if (!is_empty)
-                gupnp_context_manager_filter_context (context_filter,
-                                                      manager,
-                                                      enabled);
+        // we have switched from enabled to disabled. Flush the filtered
+        // context queue
+        if (!enabled) {
+                while (priv->filtered != NULL) {
+                        // This is ok since the filter is disabled. The
+                        // callback will not modify the list as well
+
+                        // Do not block our handler, that is what we want here
+                        g_object_set (G_OBJECT (priv->filtered->data),
+                                      "active",
+                                      TRUE,
+                                      NULL);
+
+                        g_signal_emit (manager,
+                                       signals[CONTEXT_AVAILABLE],
+                                       0,
+                                       priv->filtered->data);
+
+                        priv->filtered = g_list_delete_link (priv->filtered,
+                                                             priv->filtered);
+                }
+
+                return;
+        }
+
+        // We have switched from disabled to enabled, but the filter is empty.
+        // Nothing to do.
+        if (enabled && is_empty) {
+                return;
+        }
+
+        GHashTableIter iter;
+        g_hash_table_iter_init (&iter, priv->contexts);
+        GUPnPContext *key;
+        while (g_hash_table_iter_next (&iter, (gpointer *) &key, NULL)) {
+                if (context_filtered (context_filter, key)) {
+                        // This context is now filtered
+                        priv->filtered = g_list_prepend (priv->filtered, key);
+
+                        // Drop all references to the objects we manage
+                        g_hash_table_iter_replace (
+                                &iter,
+                                g_ptr_array_new_with_free_func (
+                                        g_object_unref));
+
+                        // Synthesize unavailable signal
+                        priv->syntesized_internal = TRUE;
+                        g_object_set (G_OBJECT (key), "active", FALSE, NULL);
+                        g_signal_emit (manager,
+                                       signals[CONTEXT_UNAVAILABLE],
+                                       0,
+                                       key);
+                        priv->syntesized_internal = FALSE;
+                }
+        }
 }
 
 static void
@@ -367,6 +375,13 @@ gupnp_context_manager_init (GUPnPContextManager *manager)
         priv = gupnp_context_manager_get_instance_private (manager);
 
         priv->context_filter = g_object_new (GUPNP_TYPE_CONTEXT_FILTER, NULL);
+        priv->contexts =
+                g_hash_table_new_full (g_direct_hash,
+                                       g_direct_equal,
+                                       g_object_unref,
+                                       (GDestroyNotify) g_ptr_array_unref);
+        priv->control_points = g_ptr_array_new ();
+        priv->root_devices = g_ptr_array_new ();
 
         g_signal_connect_after (priv->context_filter,
                                 "notify::entries",
@@ -460,8 +475,11 @@ gupnp_context_manager_dispose (GObject *object)
                                               on_context_filter_change_cb,
                                               NULL);
 
-        g_list_free_full (priv->objects, g_object_unref);
-        priv->objects = NULL;
+        g_hash_table_destroy (priv->contexts);
+
+        g_ptr_array_free (priv->control_points, TRUE);
+        g_ptr_array_free (priv->root_devices, TRUE);
+
         g_list_free_full (priv->filtered, g_object_unref);
         priv->filtered = NULL;
 
@@ -484,25 +502,26 @@ gupnp_context_manager_class_init (GUPnPContextManagerClass *klass)
         object_class->dispose      = gupnp_context_manager_dispose;
 
         /**
-         * GUPnPContextManager:port:
+         * GUPnPContextManager:port:(attributes org.gtk.Property.get=gupnp_context_manager_get_port)
          *
          * Port the contexts listen on, or 0 if you don't care what
          * port is used by #GUPnPContext objects created by this object.
          **/
-        g_object_class_install_property
-                (object_class,
-                 PROP_PORT,
-                 g_param_spec_uint ("port",
-                                    "Port",
-                                    "Port to create contexts for",
-                                    0, G_MAXUINT, SOUP_ADDRESS_ANY_PORT,
-                                    G_PARAM_READWRITE |
-                                    G_PARAM_CONSTRUCT_ONLY |
-                                    G_PARAM_STATIC_NAME |
-                                    G_PARAM_STATIC_NICK |
-                                    G_PARAM_STATIC_BLURB));
+        g_object_class_install_property (
+                object_class,
+                PROP_PORT,
+                g_param_spec_uint ("port",
+                                   "Port",
+                                   "Port to create contexts for",
+                                   0,
+                                   G_MAXUINT,
+                                   0,
+                                   G_PARAM_READWRITE | G_PARAM_CONSTRUCT_ONLY |
+                                           G_PARAM_STATIC_NAME |
+                                           G_PARAM_STATIC_NICK |
+                                           G_PARAM_STATIC_BLURB));
         /**
-         * GUPnPContextManager:family:
+         * GUPnPContextManager:family:(attributes org.gtk.Property.get=gupnp_context_manager_get_socket_family)
          *
          * The socket family to create contexts for. Use %G_SOCKET_FAMILY_INVALID
          * for any or %G_SOCKET_FAMILY_IPV4 for IPv4 contexts or
@@ -523,7 +542,7 @@ gupnp_context_manager_class_init (GUPnPContextManagerClass *klass)
                                     G_PARAM_STATIC_STRINGS));
 
         /**
-         * GUPnPContextManager:uda-version:
+         * GUPnPContextManager:uda-version:(attributes org.gtk.Property.get=gupnp_context_manager_get_uda_version)
          *
          * The UDA version the contexts will support. Use %GSSDP_UDA_VERSION_UNSPECIFIED
          * for using the default UDA version.
@@ -543,7 +562,7 @@ gupnp_context_manager_class_init (GUPnPContextManagerClass *klass)
                                     G_PARAM_STATIC_STRINGS));
 
         /**
-         * GUPnPContextManager:context-filter:
+         * GUPnPContextManager:context-filter:(attributes org.gtk.Property.get=gupnp_context_manager_get_context_filter)
          *
          * The context filter to use.
          **/
@@ -606,7 +625,7 @@ gupnp_context_manager_class_init (GUPnPContextManagerClass *klass)
  *
  * Factory-method to create a new #GUPnPContextManager. The final type of the
  * #GUPnPContextManager depends on the compile-time selection or - in case of
- * NetworkManager - on its availability during runtime. If it is not available,
+ * NetworkManager - on its availability during run-time. If it is not available,
  * the implementation falls back to the basic Unix context manager instead.
  *
  * Equivalent to calling #gupnp_context_manager_create_full (%GSSDP_UDA_VERSION_1_0, %G_SOCKET_FAMILY_IPV4, port);
@@ -632,7 +651,7 @@ gupnp_context_manager_create (guint port)
  *
  * Factory-method to create a new #GUPnPContextManager. The final type of the
  * #GUPnPContextManager depends on the compile-time selection or - in case of
- * NetworkManager - on its availability during runtime. If it is not available,
+ * NetworkManager - on its availability during run-time. If it is not available,
  * the implementation falls back to the basic Unix context manager instead.
  *
  * Returns: (transfer full): A new #GUPnPContextManager object.
@@ -685,8 +704,12 @@ gupnp_context_manager_create_full (GSSDPUDAVersion uda_version, GSocketFamily fa
         }
 #endif /* G_OS_WIN32 */
 
-        g_debug ("Using context manager implementation %s",
-                 g_type_name (impl_type));
+        g_debug ("Using context manager implementation %s, family: %d, UDA: "
+                 "%d, port: %u",
+                 g_type_name (impl_type),
+                 family,
+                 uda_version,
+                 port);
         impl = GUPNP_CONTEXT_MANAGER (g_object_new (impl_type,
                                                     "family", family,
                                                     "uda-version", uda_version,
@@ -713,23 +736,15 @@ gupnp_context_manager_create_full (GSSDPUDAVersion uda_version, GSocketFamily fa
 void
 gupnp_context_manager_rescan_control_points (GUPnPContextManager *manager)
 {
-        GList *l;
         GUPnPContextManagerPrivate *priv;
 
         g_return_if_fail (GUPNP_IS_CONTEXT_MANAGER (manager));
 
         priv = gupnp_context_manager_get_instance_private (manager);
-        l = priv->objects;
 
-        while (l) {
-                if (GUPNP_IS_CONTROL_POINT (l->data)) {
-                        GSSDPResourceBrowser *browser =
-                                GSSDP_RESOURCE_BROWSER (l->data);
-                        gssdp_resource_browser_rescan (browser);
-                }
-
-                l = l->next;
-        }
+        g_ptr_array_foreach (priv->control_points,
+                             (GFunc) gssdp_resource_browser_rescan,
+                             NULL);
 }
 
 /**
@@ -739,9 +754,23 @@ gupnp_context_manager_rescan_control_points (GUPnPContextManager *manager)
  *
  * By calling this function, you are asking @manager to keep a reference to
  * @control_point until its associated #GUPnPContext is no longer available.
- * You usually want to call this function from
- * #GUPnPContextManager::context-available handler after you create a
+ * You usually want to call this function from your
+ * [signal@GUPnP.ContextManager::context-available] handler after you create a
  * #GUPnPControlPoint object for the newly available context.
+ * You usually then give up your own reference to the control point so it will be
+ * automatically destroyed if its context is no longer available.
+ *
+ * This function is mainly useful when implementing an UPnP client.
+ *
+ * ```c
+ * void on_context_available (GUPnPContextManager *manager, GUPnPContext *context, gpointer user_data)
+ * {
+ *     GUPnPControlPoint *cp = gupnp_control_point_new (context, "urn:schemas-upnp-org:device:MediaRenderer:1");
+ *     gupnp_context_manager_manage_control_point (manager, cp);
+ *     // Subscribe to control point's signals etc.
+ *     g_object_unref (cp);
+ * }
+ * ```
  *
  * Since: 0.14.0
  **/
@@ -755,8 +784,17 @@ gupnp_context_manager_manage_control_point (GUPnPContextManager *manager,
         g_return_if_fail (GUPNP_IS_CONTROL_POINT (control_point));
 
         priv = gupnp_context_manager_get_instance_private (manager);
-        priv->objects = g_list_append (priv->objects,
-                                                g_object_ref (control_point));
+
+        GUPnPContext *ctx = GUPNP_CONTEXT (gssdp_resource_browser_get_client (
+                GSSDP_RESOURCE_BROWSER (control_point)));
+
+        GPtrArray *objects = ensure_context (priv->contexts, ctx);
+
+        g_ptr_array_add (objects, g_object_ref (control_point));
+
+        g_object_weak_ref (G_OBJECT (control_point),
+                           (GWeakNotify) g_ptr_array_remove_fast,
+                           priv->control_points);
 }
 
 /**
@@ -767,9 +805,25 @@ gupnp_context_manager_manage_control_point (GUPnPContextManager *manager,
  * By calling this function, you are asking @manager to keep a reference to
  * @root_device when its associated #GUPnPContext is no longer available. You
  * usually want to call this function from
- * #GUPnPContextManager::context-available handler after you create a
+ * [signal@GUPnP.ContextManager::context-available] handler after you create a
  * #GUPnPRootDevice object for the newly available context.
  *
+ * You usually then give up your own reference to the root device so it will be
+ * automatically destroyed if its context is no longer available.
+ *
+ * This function is mainly useful when implementing an UPnP client.
+ *
+ * ```c
+ * void on_context_available (GUPnPContextManager *manager, GUPnPContext *context, gpointer user_data)
+ * {
+ *     GError *error = NULL;
+ *
+ *     GUPnPRootDevice *rd = gupnp_root_device_new (context, "BasicLight1.xml", ".", &error);
+ *     gupnp_context_manager_manage_root_device (manager, rd);
+ *     // Subscribe to control point's signals etc.
+ *     g_object_unref (rd);
+ * }
+ * ```
  * Since: 0.14.0
  **/
 void
@@ -782,16 +836,25 @@ gupnp_context_manager_manage_root_device (GUPnPContextManager *manager,
         g_return_if_fail (GUPNP_IS_ROOT_DEVICE (root_device));
 
         priv = gupnp_context_manager_get_instance_private (manager);
-        priv->objects = g_list_append (priv->objects,
-                                       g_object_ref (root_device));
+
+        GUPnPContext *ctx =
+                gupnp_device_info_get_context (GUPNP_DEVICE_INFO (root_device));
+
+        GPtrArray *objects = ensure_context (priv->contexts, ctx);
+
+        g_ptr_array_add (objects, g_object_ref (root_device));
+
+        g_object_weak_ref (G_OBJECT (root_device),
+                           (GWeakNotify) g_ptr_array_remove_fast,
+                           priv->root_devices);
 }
 
 /**
- * gupnp_context_manager_get_port:
+ * gupnp_context_manager_get_port:(attributes org.gtk.Method.get_property=port)
  * @manager: A #GUPnPContextManager
  *
  * Get the network port associated with this context manager.
- * Returns: The network port asssociated with this context manager.
+ * Returns: The network port associated with this context manager.
  *
  * Since: 0.20.0
  */
@@ -808,13 +871,15 @@ gupnp_context_manager_get_port (GUPnPContextManager *manager)
 }
 
 /**
- * gupnp_context_manager_get_context_filter:
+ * gupnp_context_manager_get_context_filter:(attributes org.gtk.Method.get_property=context-filter)
  * @manager: A #GUPnPContextManager
  *
  * Get the #GUPnPContextFilter associated with @manager.
  *
- * Returns: (transfer none):  The #GUPnPContextFilter asssociated with this
+ * Returns: (transfer none):  The #GUPnPContextFilter associated with this
  * context manager.
+ *
+ * Since: 1.4.0
  */
 GUPnPContextFilter *
 gupnp_context_manager_get_context_filter (GUPnPContextManager *manager)
@@ -829,23 +894,7 @@ gupnp_context_manager_get_context_filter (GUPnPContextManager *manager)
 }
 
 /**
- * gupnp_context_manager_get_white_list:
- * @manager: A #GUPnPContextManager
- *
- * Get the #GUPnPContextFilter associated with @manager.
- *
- * Returns: (transfer none):  The #GUPnPContextFilter asssociated with this
- * context manager.
- * Deprecated: 1.4.0: Use gupnp_context_manager_get_context_filter() instead.
- */
-GUPnPWhiteList *
-gupnp_context_manager_get_white_list (GUPnPContextManager *manager)
-{
-        return gupnp_context_manager_get_context_filter (manager);
-}
-
-/**
- * gupnp_context_manager_get_socket_family:
+ * gupnp_context_manager_get_socket_family:(attributes org.gtk.Method.get_property=family)
  * @manager: A #GUPnPContextManager
  *
  * Get the #GSocketFamily the contexts are created for. Can be
@@ -869,7 +918,7 @@ gupnp_context_manager_get_socket_family (GUPnPContextManager *manager)
 }
 
 /**
- * gupnp_context_manager_get_uda_version:
+ * gupnp_context_manager_get_uda_version:(attributes org.gtk.Method.get_property=uda-version)
  * @manager: A #GUPnPContextManager
  *
  * Get the UDA protocol version the contexts are implementing
