@@ -26,16 +26,37 @@ struct _GUPnPContextClass {
         GSSDPClientClass parent_class;
 
         /* future padding */
+        /*<private>*/
+        /**
+         * _gupnp_reserved1:(skip):
+         *
+         * Padding
+         */
         void (* _gupnp_reserved1) (void);
+        /**
+         * _gupnp_reserved2:(skip):
+         */
         void (* _gupnp_reserved2) (void);
         void (* _gupnp_reserved3) (void);
         void (* _gupnp_reserved4) (void);
 };
 
+G_DEPRECATED_FOR(gupnp_context_new_for_address)
 GUPnPContext *
-gupnp_context_new                      (const char   *iface,
-                                        guint         port,
-                                        GError      **error);
+gupnp_context_new (const char *iface, guint port, GError **error);
+
+GUPnPContext *
+gupnp_context_new_for_address (GInetAddress *addr,
+                               guint16 port,
+                               GSSDPUDAVersion uda_version,
+                               GError **error);
+
+GUPnPContext *
+gupnp_context_new_full (const char *iface,
+                        GInetAddress *addr,
+                        guint16 port,
+                        GSSDPUDAVersion uda_version,
+                        GError **error);
 
 guint
 gupnp_context_get_port                 (GUPnPContext *context);

@@ -10,6 +10,7 @@
 #define GUPNP_SERVICE_PROXY_ACTION_H
 
 #include <gobject/gvaluecollector.h>
+#include <libxml/tree.h>
 
 G_BEGIN_DECLS
 
@@ -132,18 +133,15 @@ G_BEGIN_DECLS
         } G_STMT_END
 
 struct _GUPnPServiceProxyAction {
-        GUPnPServiceProxy *proxy;
         char *name;
         gint header_pos;
 
         SoupMessage *msg;
+        GBytes *response;
         GString *msg_str;
 
-        GCancellable *cancellable;
         gulong cancellable_connection_id;
 
-        // Support for legacy async calls
-        GUPnPServiceProxyActionCallback callback;
         gpointer user_data;
         GError *error; /* If non-NULL, description of error that
                           occurred when preparing message */
@@ -151,6 +149,8 @@ struct _GUPnPServiceProxyAction {
         GPtrArray *args;
         GHashTable *arg_map;
         gboolean pending;
+        xmlDocPtr doc;
+        xmlNodePtr params;
 };
 
 G_GNUC_INTERNAL GUPnPServiceProxyAction *
@@ -164,6 +164,9 @@ gupnp_service_proxy_action_get_result_valist (GUPnPServiceProxyAction *action,
 G_GNUC_INTERNAL void
 gupnp_service_proxy_action_serialize (GUPnPServiceProxyAction *action,
                                       const char *service_type);
+
+G_GNUC_INTERNAL void
+gupnp_service_proxy_action_check_response (GUPnPServiceProxyAction *action);
 G_END_DECLS
 
 #endif /* GUPNP_SERVICE_PROXY_ACTION_H */

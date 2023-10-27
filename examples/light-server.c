@@ -69,7 +69,7 @@ set_target_cb (GUPnPService          *service,
   }
 
   /* Return success to the client */
-  gupnp_service_action_return (action);
+  gupnp_service_action_return_success (action);
 }
 
 /* GetTarget */
@@ -81,7 +81,7 @@ get_target_cb (G_GNUC_UNUSED GUPnPService *service,
   gupnp_service_action_set (action,
                             "RetTargetValue", G_TYPE_BOOLEAN, status,
                             NULL);
-  gupnp_service_action_return (action);
+  gupnp_service_action_return_success (action);
 }
 
 /* GetStatus */
@@ -93,7 +93,7 @@ get_status_cb (G_GNUC_UNUSED GUPnPService *service,
   gupnp_service_action_set (action,
                             "ResultStatus", G_TYPE_BOOLEAN, status,
                             NULL);
-  gupnp_service_action_return (action);
+  gupnp_service_action_return_success (action);
 }
 
 /*
@@ -149,7 +149,7 @@ main (G_GNUC_UNUSED int argc, G_GNUC_UNUSED char **argv)
   }
 
   /* Create the UPnP context */
-  context = gupnp_context_new (NULL, 0, &error);
+  context = gupnp_context_new_for_address (NULL, 0, GSSDP_UDA_VERSION_1_0, &error);
   if (error) {
     g_printerr ("Error creating the GUPnP context: %s\n",
 		error->message);

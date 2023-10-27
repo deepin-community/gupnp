@@ -11,7 +11,6 @@
 
 #include <glib-object.h>
 #include <libxml/tree.h>
-#include <libsoup/soup-uri.h>
 
 #include "gupnp-context.h"
 #include "gupnp-service-info.h"
@@ -32,16 +31,13 @@ struct _GUPnPDeviceInfoClass {
         GObjectClass parent_class;
 
         /* vtable */
-        xmlNode          * (* get_element) (GUPnPDeviceInfo *info);
+        xmlNode *(*get_element) (GUPnPDeviceInfo *info);
 
-        /* FIXME: Once we can break API/ABI, clean-up and rename the
-         * _get_device/_get_service functions */
-#ifndef GOBJECT_INTROSPECTION_SKIP
-        GUPnPDeviceInfo  * (* get_device)  (GUPnPDeviceInfo *info,
-                                            xmlNode         *element);
-        GUPnPServiceInfo * (* get_service) (GUPnPDeviceInfo *info,
-                                            xmlNode         *element);
-#endif
+        GUPnPDeviceInfo *(*create_device_instance) (GUPnPDeviceInfo *info,
+                                                    xmlNode *element);
+        GUPnPServiceInfo *(*create_service_instance) (GUPnPDeviceInfo *info,
+                                                      xmlNode *element);
+
         /* future padding */
         void (* _gupnp_reserved1) (void);
         void (* _gupnp_reserved2) (void);
@@ -56,8 +52,8 @@ gupnp_device_info_get_context            (GUPnPDeviceInfo *info);
 const char *
 gupnp_device_info_get_location           (GUPnPDeviceInfo *info);
 
-const SoupURI *
-gupnp_device_info_get_url_base           (GUPnPDeviceInfo *info);
+const GUri *
+gupnp_device_info_get_url_base (GUPnPDeviceInfo *info);
 
 const char *
 gupnp_device_info_get_udn                (GUPnPDeviceInfo *info);
@@ -104,6 +100,25 @@ gupnp_device_info_get_icon_url           (GUPnPDeviceInfo *info,
                                           int             *width,
                                           int             *height);
 
+void
+gupnp_device_info_get_icon_async (GUPnPDeviceInfo *info,
+                                  const char *requested_mime_type,
+                                  int requested_depth,
+                                  int requested_width,
+                                  int requested_height,
+                                  gboolean prefer_bigger,
+                                  GCancellable *cancellable,
+                                  GAsyncReadyCallback callback,
+                                  gpointer user_data);
+
+GBytes *
+gupnp_device_info_get_icon_finish (GUPnPDeviceInfo *info,
+                                   GAsyncResult *res,
+                                   char **mime,
+                                   int *depth,
+                                   int *width,
+                                   int *height,
+                                   GError **error);
 char *
 gupnp_device_info_get_presentation_url   (GUPnPDeviceInfo *info);
 

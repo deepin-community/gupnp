@@ -10,21 +10,27 @@
  */
 
 /**
- * SECTION:gupnp-resource-factory
- * @short_description: Class for resource and resource proxy object creation.
+ * GUPnPResourceFactory:
  *
- * #GUPnPResourceFactory objects are used by #GUPnPControlPoint,
- * #GUPnPDeviceProxy and #GUPnPDevice to create resource proxy and resource
- * objects. Register UPnP type - #GType pairs to have resource or resource proxy
+ * Associating custom Services, Devices, ServiceProxies and DeviceProxies with UPnP types.
+ *
+ * #GUPnPResourceFactory objects are used by [class@GUPnP.ControlPoint],
+ * [class@GUPnP.DeviceProxy] and [class@GUPnP.Device] to create resource proxy and resource
+ * objects.
+ *
+ * Register UPnP type - [alias@GLib.Type] pairs to have resource or resource proxy
  * objects created with the specified #GType whenever an object for a resource
- * of the specified UPnP type is requested. The #GType<!-- -->s need
+ * of the specified UPnP type is requested. The #GType needs
  * to be derived from the relevant resource or resource proxy type (e.g.
- * a device proxy type needs to be derived from #GUPnPDeviceProxy).
+ * a device proxy type needs to be derived from [class@GUPnP.DeviceProxy]).
  */
+
+#define G_LOG_DOMAIN "gupnp-resource-factory"
 
 #include <config.h>
 #include <string.h>
 
+#include "gupnp-device-info-private.h"
 #include "gupnp-resource-factory-private.h"
 #include "gupnp-root-device.h"
 
@@ -36,8 +42,7 @@ typedef struct _GUPnPResourceFactoryPrivate GUPnPResourceFactoryPrivate;
 
 G_DEFINE_TYPE_WITH_PRIVATE (GUPnPResourceFactory,
                             gupnp_resource_factory,
-                            G_TYPE_OBJECT);
-
+                            G_TYPE_OBJECT)
 
 static void
 gupnp_resource_factory_init (GUPnPResourceFactory *factory)
@@ -187,21 +192,19 @@ lookup_type_with_fallback (GHashTable *resource_types,
  * @location: The location of the device description file
  * @url_base: The URL base for this device, or %NULL if none
  *
- *
  * Create a #GUPnPDeviceProxy for the device with element @element, as
  * read from the device description file specified by @location.
  *
  * Return value:(nullable)(transfer full): A new #GUPnPDeviceProxy.
  **/
 GUPnPDeviceProxy *
-gupnp_resource_factory_create_device_proxy
-                                (GUPnPResourceFactory *factory,
-                                 GUPnPContext         *context,
-                                 GUPnPXMLDoc          *doc,
-                                 xmlNode              *element,
-                                 const char           *udn,
-                                 const char           *location,
-                                 const SoupURI        *url_base)
+gupnp_resource_factory_create_device_proxy (GUPnPResourceFactory *factory,
+                                            GUPnPContext *context,
+                                            GUPnPXMLDoc *doc,
+                                            xmlNode *element,
+                                            const char *udn,
+                                            const char *location,
+                                            const GUri *url_base)
 {
         GUPnPDeviceProxy *proxy;
         GType proxy_type;
@@ -253,18 +256,17 @@ gupnp_resource_factory_create_device_proxy
  * Return value:(nullable)(transfer full): A new #GUPnPServiceProxy.
  **/
 GUPnPServiceProxy *
-gupnp_resource_factory_create_service_proxy
-                                (GUPnPResourceFactory *factory,
-                                 GUPnPContext         *context,
-                                 GUPnPXMLDoc          *doc,
-                                 xmlNode              *element,
-                                 const char           *udn,
-                                 const char           *service_type,
-                                 const char           *location,
-                                 const SoupURI        *url_base)
+gupnp_resource_factory_create_service_proxy (GUPnPResourceFactory *factory,
+                                             GUPnPContext *context,
+                                             GUPnPXMLDoc *doc,
+                                             xmlNode *element,
+                                             const char *udn,
+                                             const char *service_type,
+                                             const char *location,
+                                             const GUri *url_base)
 {
         GUPnPServiceProxy *proxy;
-        GType              proxy_type = GUPNP_TYPE_SERVICE_PROXY;
+        GType proxy_type;
         GUPnPResourceFactoryPrivate *priv;
 
         g_return_val_if_fail (GUPNP_IS_RESOURCE_FACTORY (factory), NULL);
@@ -311,17 +313,16 @@ gupnp_resource_factory_create_service_proxy
  * Return value: (nullable)(transfer full): A new #GUPnPDevice.
  **/
 GUPnPDevice *
-gupnp_resource_factory_create_device
-                                (GUPnPResourceFactory *factory,
-                                 GUPnPContext         *context,
-                                 GUPnPDevice          *root_device,
-                                 xmlNode              *element,
-                                 const char           *udn,
-                                 const char           *location,
-                                 const SoupURI        *url_base)
+gupnp_resource_factory_create_device (GUPnPResourceFactory *factory,
+                                      GUPnPContext *context,
+                                      GUPnPDevice *root_device,
+                                      xmlNode *element,
+                                      const char *udn,
+                                      const char *location,
+                                      const GUri *url_base)
 {
         GUPnPDevice *device;
-        GType        device_type = GUPNP_TYPE_DEVICE;
+        GType device_type;
         GUPnPResourceFactoryPrivate *priv;
 
         g_return_val_if_fail (GUPNP_IS_RESOURCE_FACTORY (factory), NULL);
@@ -338,14 +339,25 @@ gupnp_resource_factory_create_device
                                                  element,
                                                  GUPNP_TYPE_DEVICE);
 
+        GUPnPXMLDoc *doc = _gupnp_device_info_get_document (
+                GUPNP_DEVICE_INFO (root_device));
         device = g_object_new (device_type,
-                               "resource-factory", factory,
-                               "context", context,
-                               "root-device", root_device,
-                               "location", location,
-                               "udn", udn,
-                               "url-base", url_base,
-                               "element", element,
+                               "resource-factory",
+                               factory,
+                               "context",
+                               context,
+                               "root-device",
+                               root_device,
+                               "location",
+                               location,
+                               "udn",
+                               udn,
+                               "url-base",
+                               url_base,
+                               "document",
+                               doc,
+                               "element",
+                               element,
                                NULL);
 
         return device;
@@ -367,17 +379,16 @@ gupnp_resource_factory_create_device
  * Return value: (nullable)(transfer full): A new #GUPnPService.
  **/
 GUPnPService *
-gupnp_resource_factory_create_service
-                                (GUPnPResourceFactory *factory,
-                                 GUPnPContext         *context,
-                                 GUPnPDevice          *root_device,
-                                 xmlNode              *element,
-                                 const char           *udn,
-                                 const char           *location,
-                                 const SoupURI        *url_base)
+gupnp_resource_factory_create_service (GUPnPResourceFactory *factory,
+                                       GUPnPContext *context,
+                                       GUPnPDevice *root_device,
+                                       xmlNode *element,
+                                       const char *udn,
+                                       const char *location,
+                                       const GUri *url_base)
 {
         GUPnPService *service;
-        GType         service_type = GUPNP_TYPE_SERVICE;
+        GType service_type;
         GUPnPResourceFactoryPrivate *priv;
 
         g_return_val_if_fail (GUPNP_IS_RESOURCE_FACTORY (factory), NULL);
@@ -395,13 +406,23 @@ gupnp_resource_factory_create_service
                                                   element,
                                                   GUPNP_TYPE_SERVICE);
 
+        GUPnPXMLDoc *doc = _gupnp_device_info_get_document (
+                GUPNP_DEVICE_INFO (root_device));
         service = g_object_new (service_type,
-                                "context", context,
-                                "root-device", root_device,
-                                "location", location,
-                                "udn", udn,
-                                "url-base", url_base,
-                                "element", element,
+                                "context",
+                                context,
+                                "root-device",
+                                root_device,
+                                "location",
+                                location,
+                                "udn",
+                                udn,
+                                "url-base",
+                                url_base,
+                                "document",
+                                doc,
+                                "element",
+                                element,
                                 NULL);
 
         return service;

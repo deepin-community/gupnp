@@ -107,6 +107,42 @@ gupnp_rootdevice_error_quark (void)
         return quark;
 }
 
+/**
+ * GUPNP_SERVICE_INTROSPECTION_ERROR:
+ *
+ * The #GQuark uniquely used by GUPnP ServiceIntrospection errors.
+ *
+ * Returns: a #GQuark uniquely used by GUPnP ServiceIntrospection creation errors.
+ */
+GQuark
+gupnp_service_introspection_error_quark (void)
+{
+        static GQuark quark = 0;
+
+        if (!quark)
+                quark = g_quark_from_static_string ("gupnp-service-introspection-error");
+
+        return quark;
+}
+
+/**
+ * GUPNP_SERVICE_ERROR:
+ *
+ * The #GQuark uniquely used by GUPnP Service errors.
+ *
+ * Returns: a #GQuark uniquely used by GUPnP Service creation errors.
+ */
+GQuark
+gupnp_service_error_quark (void)
+{
+        static GQuark quark = 0;
+
+        if (!quark)
+                quark = g_quark_from_static_string ("gupnp-service-error");
+
+        return quark;
+}
+
 /* Soup status code => GUPnPServerError */
 static int
 code_from_status_code (int status_code)
@@ -128,17 +164,19 @@ void
 _gupnp_error_set_server_error (GError     **error,
                                SoupMessage *msg)
 {
-        g_set_error_literal (error,
-                             GUPNP_SERVER_ERROR,
-                             code_from_status_code (msg->status_code),
-                             msg->reason_phrase);
+        g_set_error_literal (
+                error,
+                GUPNP_SERVER_ERROR,
+                code_from_status_code (soup_message_get_status (msg)),
+                soup_message_get_reason_phrase (msg));
 }
 
 /* Create a #GError with status of @msg */
 GError *
 _gupnp_error_new_server_error (SoupMessage *msg)
 {
-        return g_error_new_literal (GUPNP_SERVER_ERROR,
-                                    code_from_status_code (msg->status_code),
-                                    msg->reason_phrase);
+        return g_error_new_literal (
+                GUPNP_SERVER_ERROR,
+                code_from_status_code (soup_message_get_status (msg)),
+                soup_message_get_reason_phrase (msg));
 }

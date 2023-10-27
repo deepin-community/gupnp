@@ -7,14 +7,19 @@
  *
  */
 
+#define G_LOG_DOMAIN "gupnp-control-point"
+
 /**
- * SECTION:gupnp-control-point
- * @short_description: Class for resource discovery.
+ * GUPnPControlPoint:
+ *
+ * Network resource discovery.
  *
  * #GUPnPControlPoint handles device and service discovery. After creating
- * a control point and activating it using gssdp_resource_browser_set_active(),
- * the ::device-proxy-available, ::service-proxy-available,
- * ::device-proxy-unavailable and ::service-proxy-unavailable signals will
+ * a control point and activating it using [method@GSSDP.ResourceBrowser.set_active],
+ * the [signal@GUPnP.ControlPoint::device-proxy-available],
+ * [signal@GUPnP.ControlPoint::service-proxy-available],
+ * [signal@GUPnP.ControlPoint::device-proxy-unavailable] and
+ * [signal@GUPnP.ControlPoint::service-proxy-unavailable] signals will
  * be emitted whenever the availability of a device or service matching
  * the specified discovery target changes.
  */
@@ -71,6 +76,7 @@ typedef struct {
 
         SoupMessage *message;
         GSource *timeout_source;
+        GCancellable *cancellable;
         int tries;
         int timeout;
 } GetDescriptionURLData;
@@ -83,27 +89,22 @@ static void
 get_description_url_data_free (GetDescriptionURLData *data)
 {
         gupnp_control_point_remove_pending_get (data->control_point, data);
-        if (data->message) {
-                GUPnPContext *context;
-                SoupSession *session;
-
-
-                context = gupnp_control_point_get_context (data->control_point);
-                session = gupnp_context_get_session (context);
-
-                soup_session_cancel_message (session,
-                                             data->message,
-                                             SOUP_STATUS_CANCELLED);
-        }
 
         if (data->timeout_source) {
                 g_source_destroy (data->timeout_source);
                 g_source_unref (data->timeout_source);
         }
 
+        /* Cancel any pending description file GETs */
+        if (!g_cancellable_is_cancelled (data->cancellable)) {
+                g_cancellable_cancel (data->cancellable);
+        }
+
         g_free (data->udn);
         g_free (data->service_type);
         g_free (data->description_url);
+        g_object_unref (data->control_point);
+        g_object_unref (data->cancellable);
 
         g_slice_free (GetDescriptionURLData, data);
 }
@@ -192,10 +193,7 @@ gupnp_control_point_dispose (GObject *object)
 
         gssdp_resource_browser_set_active (browser, FALSE);
 
-        if (priv->factory) {
-                g_object_unref (priv->factory);
-                priv->factory = NULL;
-        }
+        g_clear_object (&priv->factory);
 
         /* Cancel any pending description file GETs */
         while (priv->pending_gets) {
@@ -284,13 +282,13 @@ find_device_node (GUPnPControlPoint *control_point,
 }
 
 static void
-create_and_report_service_proxy (GUPnPControlPoint  *control_point,
-                                 GUPnPXMLDoc        *doc,
-                                 xmlNode            *element,
-                                 const char         *udn,
-                                 const char         *service_type,
-                                 const char         *description_url,
-                                 SoupURI            *url_base)
+create_and_report_service_proxy (GUPnPControlPoint *control_point,
+                                 GUPnPXMLDoc *doc,
+                                 xmlNode *element,
+                                 const char *udn,
+                                 const char *service_type,
+                                 const char *description_url,
+                                 GUri *url_base)
 {
         GUPnPServiceProxy *proxy;
         GUPnPResourceFactory *factory;
@@ -324,12 +322,12 @@ create_and_report_service_proxy (GUPnPControlPoint  *control_point,
 }
 
 static void
-create_and_report_device_proxy (GUPnPControlPoint  *control_point,
-                                GUPnPXMLDoc        *doc,
-                                xmlNode            *element,
-                                const char         *udn,
-                                const char         *description_url,
-                                SoupURI            *url_base)
+create_and_report_device_proxy (GUPnPControlPoint *control_point,
+                                GUPnPXMLDoc *doc,
+                                xmlNode *element,
+                                const char *udn,
+                                const char *description_url,
+                                GUri *url_base)
 {
         GUPnPDeviceProxy *proxy;
         GUPnPResourceFactory *factory;
@@ -400,13 +398,13 @@ compare_service_types_versioned (const char *searched_service,
 
 /* Search @element for matching services */
 static void
-process_service_list (xmlNode           *element,
+process_service_list (xmlNode *element,
                       GUPnPControlPoint *control_point,
-                      GUPnPXMLDoc       *doc,
-                      const char        *udn,
-                      const char        *service_type,
-                      const char        *description_url,
-                      SoupURI           *url_base)
+                      GUPnPXMLDoc *doc,
+                      const char *udn,
+                      const char *service_type,
+                      const char *description_url,
+                      GUri *url_base)
 {
         g_object_ref (control_point);
 
@@ -446,13 +444,13 @@ process_service_list (xmlNode           *element,
 
 /* Recursively search @element for matching devices */
 static void
-process_device_list (xmlNode           *element,
+process_device_list (xmlNode *element,
                      GUPnPControlPoint *control_point,
-                     GUPnPXMLDoc       *doc,
-                     const char        *udn,
-                     const char        *service_type,
-                     const char        *description_url,
-                     SoupURI           *url_base)
+                     GUPnPXMLDoc *doc,
+                     const char *udn,
+                     const char *service_type,
+                     const char *description_url,
+                     GUri *url_base)
 {
         g_object_ref (control_point);
 
@@ -531,7 +529,7 @@ description_loaded (GUPnPControlPoint *control_point,
                     const char        *description_url)
 {
         xmlNode *element;
-        SoupURI *url_base;
+        GUri *url_base;
 
         /* Save the URL base, if any */
         element = xml_util_get_element ((xmlNode *)
@@ -551,7 +549,8 @@ description_loaded (GUPnPControlPoint *control_point,
                                                            "URLBase",
                                                            NULL);
         if (!url_base)
-                url_base = soup_uri_new (description_url);
+                url_base =
+                        g_uri_parse (description_url, G_URI_FLAGS_NONE, NULL);
 
         /* Iterate matching devices */
         process_device_list (element,
@@ -563,7 +562,7 @@ description_loaded (GUPnPControlPoint *control_point,
                              url_base);
 
         /* Cleanup */
-        soup_uri_free (url_base);
+        g_uri_unref (url_base);
 }
 
 
@@ -574,17 +573,37 @@ description_url_retry_timeout (gpointer user_data);
  * Description URL downloaded.
  */
 static void
-got_description_url (SoupSession           *session,
-                     SoupMessage           *msg,
+got_description_url (GObject *source,
+                     GAsyncResult *res,
                      GetDescriptionURLData *data)
 {
         GUPnPXMLDoc *doc;
         GUPnPControlPointPrivate *priv;
+        GError *error = NULL;
+        gboolean retry = FALSE;
+        SoupMessage *message =
+                soup_session_get_async_result_message (SOUP_SESSION (source),
+                                                       res);
 
-        if (msg->status_code == SOUP_STATUS_CANCELLED)
-                return;
+        GBytes *body = soup_session_send_and_read_finish (SOUP_SESSION (source),
+                                                          res,
+                                                          &error);
 
-        data->message = NULL;
+        if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_CANCELLED))
+                goto out;
+
+        if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT)) {
+                g_clear_error (&error);
+                retry = TRUE;
+        }
+
+        // FIXME: This needs better handling
+        if (error != NULL) {
+                g_warning ("Retrieving the description document failed: %s",
+                           error->message);
+                goto out;
+        }
+
         priv = gupnp_control_point_get_instance_private (data->control_point);
 
         /* Now, make sure again this document is not already cached. If it is,
@@ -598,18 +617,20 @@ got_description_url (SoupSession           *session,
                                     data->service_type,
                                     data->description_url);
 
-                get_description_url_data_free (data);
-
-                return;
+                goto out;
         }
 
         /* Not cached */
-        if (SOUP_STATUS_IS_SUCCESSFUL (msg->status_code)) {
+        if (!retry &&
+            SOUP_STATUS_IS_SUCCESSFUL (soup_message_get_status (message))) {
                 xmlDoc *xml_doc;
+                gsize length;
+                gconstpointer body_data;
+
+                body_data = g_bytes_get_data (body, &length);
 
                 /* Parse response */
-                xml_doc = xmlRecoverMemory (msg->response_body->data,
-                                            msg->response_body->length);
+                xml_doc = xmlRecoverMemory (body_data, length);
                 if (xml_doc) {
                         doc = gupnp_xml_doc_new (xml_doc);
 
@@ -635,20 +656,21 @@ got_description_url (SoupSession           *session,
                 } else
                         g_warning ("Failed to parse %s", data->description_url);
 
-                get_description_url_data_free (data);
         } else {
-                GMainContext *async_context;
+                GMainContext *async_context =
+                        g_main_context_get_thread_default ();
 
                 /* Retry GET after a timeout */
-                async_context = soup_session_get_async_context (session);
-
                 data->tries--;
 
                 if (data->tries > 0) {
-                        g_warning ("Failed to GET %s: %s, retrying in %d seconds",
-                                   data->description_url,
-                                   msg->reason_phrase,
-                                   data->timeout);
+                        g_warning (
+                                "Failed to GET %s: %s, retrying in %d seconds",
+                                data->description_url,
+                                !retry ? soup_message_get_reason_phrase (
+                                                 message)
+                                       : "Timed out",
+                                data->timeout);
 
                         data->timeout_source = g_timeout_source_new_seconds
                                         (data->timeout);
@@ -658,10 +680,17 @@ got_description_url (SoupSession           *session,
                                                NULL);
                         g_source_attach (data->timeout_source, async_context);
                         data->timeout <<= 1;
+                        return;
                 } else {
                         g_warning ("Maximum number of retries failed, not trying again");
                 }
         }
+
+out:
+        g_clear_error (&error);
+        get_description_url_data_free (data);
+        g_bytes_unref (body);
+        g_object_unref (message);
 }
 
 /*
@@ -682,6 +711,8 @@ load_description (GUPnPControlPoint *control_point,
 {
         GUPnPXMLDoc *doc;
         GUPnPControlPointPrivate *priv;
+
+        g_debug ("Loading description document %s", description_url);
 
         priv = gupnp_control_point_get_instance_private (control_point);
         doc = g_hash_table_lookup (priv->doc_cache,
@@ -710,6 +741,15 @@ load_description (GUPnPControlPoint *control_point,
                 data->timeout = timeout;
                 local_description = gupnp_context_rewrite_uri (context,
                                                                description_url);
+                if (local_description == NULL) {
+                        g_warning ("Invalid description URL: %s",
+                                   description_url);
+
+                        g_slice_free (GetDescriptionURLData, data);
+
+                        return;
+                }
+
                 data->message = soup_message_new (SOUP_METHOD_GET,
                                                   local_description);
                 g_free (local_description);
@@ -725,21 +765,22 @@ load_description (GUPnPControlPoint *control_point,
 
                 http_request_set_accept_language (data->message);
 
-                data->control_point   = control_point;
-
+                data->control_point = g_object_ref (control_point);
+                data->cancellable = g_cancellable_new ();
                 data->udn             = g_strdup (udn);
                 data->service_type    = g_strdup (service_type);
                 data->description_url = g_strdup (description_url);
                 data->timeout_source  = NULL;
-
                 priv->pending_gets = g_list_prepend (priv->pending_gets,
                                                      data);
 
-                soup_session_queue_message (session,
-                                            data->message,
-                                            (SoupSessionCallback)
-                                                   got_description_url,
-                                            data);
+                soup_session_send_and_read_async (
+                        session,
+                        data->message,
+                        G_PRIORITY_DEFAULT,
+                        data->cancellable,
+                        (GAsyncReadyCallback) got_description_url,
+                        data);
         }
 }
 
@@ -941,7 +982,8 @@ gupnp_control_point_resource_unavailable
                                                   service_type);
 
         if (get_data) {
-                get_description_url_data_free (get_data);
+                if (!g_cancellable_is_cancelled (get_data->cancellable))
+                        g_cancellable_cancel (get_data->cancellable);
         }
 
         g_free (udn);
@@ -1024,7 +1066,7 @@ gupnp_control_point_class_init (GUPnPControlPointClass *klass)
                 gupnp_control_point_resource_unavailable;
 
         /**
-         * GUPnPControlPoint:resource-factory:
+         * GUPnPControlPoint:resource-factory:(attributes org.gtk.Property.get=gupnp_control_point_get_resource_factory)
          *
          * The resource factory to use. Set to NULL for default factory.
          **/
@@ -1134,8 +1176,8 @@ gupnp_control_point_class_init (GUPnPControlPointClass *klass)
  * Create a new #GUPnPControlPoint with the specified @context and @target.
  *
  * @target should be a service or device name, such as
- * <literal>urn:schemas-upnp-org:service:WANIPConnection:1</literal> or
- * <literal>urn:schemas-upnp-org:device:MediaRenderer:1</literal>.
+ * `urn:schemas-upnp-org:service:WANIPConnection:1` or
+ * `urn:schemas-upnp-org:device:MediaRenderer:1`.
  *
  * Return value: A new #GUPnPControlPoint object.
  **/
@@ -1162,8 +1204,12 @@ gupnp_control_point_new (GUPnPContext *context,
  * @target.
  *
  * @target should be a service or device name, such as
- * <literal>urn:schemas-upnp-org:service:WANIPConnection:1</literal> or
- * <literal>urn:schemas-upnp-org:device:MediaRenderer:1</literal>.
+ * `urn:schemas-upnp-org:service:WANIPConnection:1` or
+ * `urn:schemas-upnp-org:device:MediaRenderer:1`.
+ *
+ * By passing a custom `GUPnPResourceFactory`, the proxies handed out in ::device-available and
+ * ::service-available can be overridden to hand out custom classes instead of the generic
+ * [class@GUPnP.ServiceProxy] and [class@GUPnP.DeviceProxy].
  *
  * Return value: A new #GUPnPControlPoint object.
  **/
@@ -1191,6 +1237,7 @@ gupnp_control_point_new_full (GUPnPContext         *context,
  * Get the #GUPnPControlPoint associated with @control_point.
  *
  * Returns: (transfer none): The #GUPnPContext.
+ * Deprecated: 1.4.0: Use [method@GSSDP.ResourceBrowser.get_client] instead.
  **/
 GUPnPContext *
 gupnp_control_point_get_context (GUPnPControlPoint *control_point)
@@ -1209,11 +1256,17 @@ gupnp_control_point_get_context (GUPnPControlPoint *control_point)
  * gupnp_control_point_list_device_proxies:
  * @control_point: A #GUPnPControlPoint
  *
- * Get the #GList of discovered #GUPnPDeviceProxy objects. Do not free the list
- * nor its elements.
+ * Get the list of #GUPnPDeviceProxy objects the control point currently assumes to
+ * be active.
  *
- * Return value: (element-type GUPnP.DeviceProxy) (transfer none):  a #GList of
- * #GUPnPDeviceProxy objects.
+ * Since a device might have gone offline without signalizing it, but
+ * the automatic resource timeout has not happened yet, it is possible that some of
+ * the devices listed are not available anymore on the network.
+ *
+ * Do not free the list nor its elements.
+ *
+ * Return value: (element-type GUPnP.DeviceProxy) (transfer none): Device proxies
+ * currently assumed to be active.
  **/
 const GList *
 gupnp_control_point_list_device_proxies (GUPnPControlPoint *control_point)
@@ -1231,11 +1284,17 @@ gupnp_control_point_list_device_proxies (GUPnPControlPoint *control_point)
  * gupnp_control_point_list_service_proxies:
  * @control_point: A #GUPnPControlPoint
  *
- * Get the #GList of discovered #GUPnPServiceProxy objects. Do not free the
- * list nor its elements.
+ * Get the list of discovered #GUPnPServiceProxy objects the control point currently assumes to
+ * be active.
  *
- * Return value: (element-type GUPnP.ServiceProxy) (transfer none): a #GList
- * of #GUPnPServiceProxy objects.
+ * Since a device might have gone offline without signalizing it, but
+ * the automatic resource timeout has not happened yet, it is possible that some of
+ * the services listed are not available anymore on the network.
+ *
+ * Do not free the list nor its elements.
+ *
+ * Return value: (element-type GUPnP.ServiceProxy) (transfer none): Service proxies
+ * currently assumed to be active.
  **/
 const GList *
 gupnp_control_point_list_service_proxies (GUPnPControlPoint *control_point)
@@ -1250,12 +1309,14 @@ gupnp_control_point_list_service_proxies (GUPnPControlPoint *control_point)
 }
 
 /**
- * gupnp_control_point_get_resource_factory:
+ * gupnp_control_point_get_resource_factory:(attributes org.gtk.Method.get_property=resource-factory)
  * @control_point: A #GUPnPControlPoint
  *
- * Get the #GUPnPResourceFactory used by the @control_point.
+ * Get the #GUPnPResourceFactory used by the @control_point. If none was set during construction
+ * by calling [ctor@GUPnP.ControlPoint.new_full], equivalent to calling
+ * [func@GUPnP.ResourceFactory.get_default]
  *
- * Returns: (transfer none): A #GUPnPResourceFactory.
+ * Returns: (transfer none): The #GUPnPResourceFactory used by this control point
  **/
 GUPnPResourceFactory *
 gupnp_control_point_get_resource_factory (GUPnPControlPoint *control_point)

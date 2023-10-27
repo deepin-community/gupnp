@@ -9,12 +9,17 @@
 #ifndef GUPNP_SERVICE_PRIVATE_H
 #define GUPNP_SERVICE_PRIVATE_H
 
+#include "gupnp-context.h"
+#include "gupnp-xml-doc.h"
+
+#include <libsoup/soup.h>
+
 struct _GUPnPServiceAction {
         GUPnPContext *context;
 
         char         *name;
 
-        SoupMessage  *msg;
+        SoupServerMessage *msg;
         gboolean      accept_gzip;
 
         GUPnPXMLDoc  *doc;
@@ -24,5 +29,8 @@ struct _GUPnPServiceAction {
 
         guint         argument_count;
 };
+
+void
+gupnp_service_action_unref (struct _GUPnPServiceAction *action);
 
 #endif

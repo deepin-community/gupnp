@@ -7,14 +7,7 @@
  *
  */
 
-/**
- * SECTION:gupnp-device
- * @short_description: Class for device implementations.
- *
- * #GUPnPDevice allows for retrieving a device's subdevices
- * and services. #GUPnPDevice implements the #GUPnPDeviceInfo
- * interface.
- */
+#define G_LOG_DOMAIN "gupnp-device"
 
 #include <config.h>
 #include <string.h>
@@ -30,6 +23,15 @@ struct _GUPnPDevicePrivate {
 };
 typedef struct _GUPnPDevicePrivate GUPnPDevicePrivate;
 
+/**
+ * GUPnPDevice:
+ *
+ * Base class for UPnP device implementations.
+ *
+ * #GUPnPDevice allows for retrieving a device's sub-devices
+ * and services. #GUPnPDevice implements the #GUPnPDeviceInfo
+ * interface.
+ */
 G_DEFINE_TYPE_WITH_PRIVATE (GUPnPDevice,
                             gupnp_device,
                             GUPNP_TYPE_DEVICE_INFO)
@@ -50,7 +52,7 @@ gupnp_device_get_device (GUPnPDeviceInfo *info,
         GUPnPContext         *context;
         GUPnPDevice          *root_device;
         const char           *location;
-        const SoupURI        *url_base;
+        const GUri *url_base;
 
         device = GUPNP_DEVICE (info);
         priv = gupnp_device_get_instance_private (device);
@@ -90,7 +92,7 @@ gupnp_device_get_service (GUPnPDeviceInfo *info,
         GUPnPContext         *context;
         GUPnPDevice          *root_device;
         const char           *location, *udn;
-        const SoupURI        *url_base;
+        const GUri *url_base;
 
         device = GUPNP_DEVICE (info);
         priv = gupnp_device_get_instance_private (device);
@@ -218,8 +220,8 @@ gupnp_device_class_init (GUPnPDeviceClass *klass)
 
         info_class = GUPNP_DEVICE_INFO_CLASS (klass);
 
-        info_class->get_device  = gupnp_device_get_device;
-        info_class->get_service = gupnp_device_get_service;
+        info_class->create_device_instance  = gupnp_device_get_device;
+        info_class->create_service_instance = gupnp_device_get_service;
 
         /**
          * GUPnPDevice:root-device:

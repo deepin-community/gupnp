@@ -7,13 +7,7 @@
  *
  */
 
-/**
- * SECTION:gupnp-device-proxy
- * @short_description: Proxy class for remote devices.
- *
- * #GUPnPDeviceProxy allows for retrieving proxies for a device's subdevices
- * and services. #GUPnPDeviceProxy implements the #GUPnPDeviceInfo interface.
- */
+#define G_LOG_DOMAIN "gupnp-device-proxy"
 
 #include <config.h>
 #include <string.h>
@@ -23,6 +17,14 @@
 #include "gupnp-resource-factory-private.h"
 #include "xml-util.h"
 
+/**
+ * GUPnPDeviceProxy:
+ *
+ * Interaction with remote UPnP devices.
+ *
+ * #GUPnPDeviceProxy allows for retrieving proxies for a device's sub-devices
+ * and services. It implements the [class@GUPnP.DeviceInfo] abstract class.
+ */
 G_DEFINE_TYPE (GUPnPDeviceProxy,
                gupnp_device_proxy,
                GUPNP_TYPE_DEVICE_INFO)
@@ -37,7 +39,7 @@ gupnp_device_proxy_get_device (GUPnPDeviceInfo *info,
         GUPnPContext         *context;
         GUPnPXMLDoc          *doc;
         const char           *location;
-        const SoupURI        *url_base;
+        const GUri *url_base;
 
         factory = gupnp_device_info_get_resource_factory (info);
         context = gupnp_device_info_get_context (info);
@@ -65,7 +67,7 @@ gupnp_device_proxy_get_service (GUPnPDeviceInfo *info,
         GUPnPContext         *context;
         GUPnPXMLDoc          *doc;
         const char           *location, *udn;
-        const SoupURI        *url_base;
+        const GUri *url_base;
 
         factory = gupnp_device_info_get_resource_factory (info);
         context = gupnp_device_info_get_context (info);
@@ -98,7 +100,7 @@ gupnp_device_proxy_class_init (GUPnPDeviceProxyClass *klass)
 
         info_class = GUPNP_DEVICE_INFO_CLASS (klass);
 
-        info_class->get_device  = gupnp_device_proxy_get_device;
-        info_class->get_service = gupnp_device_proxy_get_service;
+        info_class->create_device_instance  = gupnp_device_proxy_get_device;
+        info_class->create_service_instance = gupnp_device_proxy_get_service;
 }
 

@@ -6,17 +6,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
-/**
- * SECTION:gupnp-context-filter
- * @short_description: Class for network filtering.
- *
- * #GUPnPContextFilter handles network filtering. It provides API to manage a
- * list of entries that will be used to filter networks. The #GUPnPContextFilter
- * could be enabled or not. If it's enabled but the entries list is empty, it
- * behaves as disabled.
- *
- * Since: 1.4.0
- */
+#define G_LOG_DOMAIN "gupnp-context-filter"
 
 #include "gupnp-context-filter.h"
 
@@ -31,12 +21,44 @@ typedef struct _GUPnPContextFilterPrivate GUPnPContextFilterPrivate;
 /**
  * GUPnPContextFilter:
  *
- * Class for network context filtering.
+ * Network context filter, used by [class@GUPnP.ContextManager]
  *
  * #GUPnPContextFilter handles network filtering. It provides API to manage a
- * list of entries that will be used to filter networks. The #GUPnPContextFilter
+ * list of entries that will be used to positive filter networks. The #GUPnPContextFilter
  * could be enabled or not. If it's enabled but the entries list is empty, it
- * behaves as disabled.
+ * behaves as if being disabled.
+ *
+ * The GUPnPContextFilter is used with the [class@GUPnP.ContextManager]
+ * to narrow down the contexts that are notified by it.
+ *
+ * Contexts can be filtered by the following criteria:
+ *
+ *  - Their IP addresses
+ *  - The network device they will live on
+ *  - The name of the network the context would join
+ *
+ * To add or modify a context filter, you need to retrieve the current context filter
+ * from the context manger using [method@GUPnP.ContextManager.get_context_filter].
+ *
+ * By default, a context filter is empty and disabled.
+ *
+ * For example, to only react to contexts that are appearing on eth0 or when being in the WiFi network with
+ * the SSID "HomeNetwork", and on IPv6 localhost, you should do:
+ *
+ *
+ * ```c
+ * GUPnPContextFilter* filter;
+ *
+ * filter = gupnp_context_manager_get_context_filter (manager);
+ * const char *filter_entries[] = {
+ *     "eth0",
+ *     "HomeNetwork",
+ *     "::1",
+ *     NULL
+ * };
+ * gupnp_context_filter_add_entryv (filter, filter_entries);
+ * gupnp_context_filter_set_enabled (filter, TRUE);
+ * ```
  *
  * Since: 1.4.0
  */
@@ -77,11 +99,20 @@ gupnp_context_filter_set_property (GObject *object,
 
         switch (property_id) {
         case PROP_ENABLED:
-                priv->enabled = g_value_get_boolean (value);
+                gupnp_context_filter_set_enabled (list,
+                                                  g_value_get_boolean (value));
                 break;
-        case PROP_ENTRIES:
-                priv->entries = g_value_get_pointer (value);
-                break;
+        case PROP_ENTRIES: {
+                g_hash_table_remove_all (priv->entries);
+                GPtrArray *array = g_ptr_array_new ();
+                GList *entries = g_value_get_pointer (value);
+                for (GList *it = entries; it != NULL; it = g_list_next (it)) {
+                        g_ptr_array_add (array, it->data);
+                }
+                g_ptr_array_add (array, NULL);
+                gupnp_context_filter_add_entryv (list, (char **) array->pdata);
+                g_ptr_array_unref (array);
+        } break;
         default:
                 G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
                 break;
@@ -105,7 +136,8 @@ gupnp_context_filter_get_property (GObject *object,
                 g_value_set_boolean (value, priv->enabled);
                 break;
         case PROP_ENTRIES:
-                g_value_set_pointer (value, priv->entries);
+                g_value_set_pointer (value,
+                                     gupnp_context_filter_get_entries (list));
                 break;
         default:
                 G_OBJECT_WARN_INVALID_PROPERTY_ID (object, property_id, pspec);
@@ -142,7 +174,7 @@ gupnp_context_filter_class_init (GUPnPContextFilterClass *klass)
         object_class->finalize = gupnp_context_filter_class_finalize;
 
         /**
-         * GUPnPContextFilter:enabled:
+         * GUPnPContextFilter:enabled:(attributes org.gtk.Property.get=gupnp_context_filter_get_enabled org.gtk.Property.set=gupnp_context_filter_set_enabled)
          *
          * Whether this context filter is active or not.
          *
@@ -156,10 +188,11 @@ gupnp_context_filter_class_init (GUPnPContextFilterClass *klass)
                                       "TRUE if the context filter is active.",
                                       FALSE,
                                       G_PARAM_CONSTRUCT | G_PARAM_READWRITE |
-                                              G_PARAM_STATIC_STRINGS));
+                                              G_PARAM_STATIC_STRINGS |
+                                              G_PARAM_EXPLICIT_NOTIFY));
 
         /**
-         * GUPnPContextFilter:entries: (type GList(utf8))
+         * GUPnPContextFilter:entries: (type GList(utf8))(attributes org.gtk.Property.get=gupnp_context_filter_get_entries)
          *
          * A list of items to filter for.
          *
@@ -170,10 +203,11 @@ gupnp_context_filter_class_init (GUPnPContextFilterClass *klass)
                 PROP_ENTRIES,
                 g_param_spec_pointer (
                         "entries",
-                        "Entries",
+                        "Filter entries",
                         "GList of strings that compose the context filter.",
                         G_PARAM_CONSTRUCT_ONLY | G_PARAM_READWRITE |
-                                G_PARAM_STATIC_STRINGS));
+                                G_PARAM_STATIC_STRINGS |
+                                G_PARAM_EXPLICIT_NOTIFY));
 }
 
 /**
@@ -193,7 +227,7 @@ gupnp_context_filter_new (void)
 }
 
 /**
- * gupnp_context_filter_set_enabled:
+ * gupnp_context_filter_set_enabled:(attributes org.gtk.Method.set_property=enabled)
  * @context_filter: A #GUPnPContextFilter
  * @enable:  %TRUE to enable @context_filter, %FALSE otherwise
  *
@@ -210,12 +244,14 @@ gupnp_context_filter_set_enabled (GUPnPContextFilter *context_filter,
         g_return_if_fail (GUPNP_IS_CONTEXT_FILTER (context_filter));
 
         priv = gupnp_context_filter_get_instance_private (context_filter);
-        priv->enabled = enable;
-        g_object_notify (G_OBJECT (context_filter), "enabled");
+        if (priv->enabled != enable) {
+                priv->enabled = enable;
+                g_object_notify (G_OBJECT (context_filter), "enabled");
+        }
 }
 
 /**
- * gupnp_context_filter_get_enabled:
+ * gupnp_context_filter_get_enabled:(attributes org.gtk.Method.get_property=enabled)
  * @context_filter: A #GUPnPContextFilter
  *
  * Return the status of the #GUPnPContextFilter
@@ -255,7 +291,7 @@ gupnp_context_filter_is_empty (GUPnPContextFilter *context_filter)
 
         priv = gupnp_context_filter_get_instance_private (context_filter);
 
-        return (priv->entries == NULL);
+        return (g_hash_table_size (priv->entries) == 0);
 }
 
 /**
@@ -297,8 +333,8 @@ gupnp_context_filter_add_entry (GUPnPContextFilter *context_filter,
  * @entries: (array zero-terminated=1): A %NULL-terminated list of strings
  *
  * Add a list of entries to a #GUPnPContextFilter. This is a helper function to
- * directly add a %NULL-terminated array of string usually aquired from
- * commandline args.
+ * directly add a %NULL-terminated array of string usually acquired from
+ * command line arguments.
  *
  * Since: 1.4.0
  */
@@ -307,12 +343,20 @@ gupnp_context_filter_add_entryv (GUPnPContextFilter *context_filter,
                                  gchar **entries)
 {
         gchar *const *iter = entries;
+        GUPnPContextFilterPrivate *priv;
 
         g_return_if_fail (GUPNP_IS_CONTEXT_FILTER (context_filter));
         g_return_if_fail ((entries != NULL));
 
-        for (; *iter != NULL; iter++)
-                gupnp_context_filter_add_entry (context_filter, *iter);
+        priv = gupnp_context_filter_get_instance_private (context_filter);
+        gboolean changed = FALSE;
+        for (; *iter != NULL; iter++) {
+                if (g_hash_table_add (priv->entries, g_strdup (*iter)))
+                        changed = TRUE;
+        }
+
+        if (changed)
+                g_object_notify (G_OBJECT (context_filter), "entries");
 }
 
 /**
@@ -355,7 +399,6 @@ gupnp_context_filter_remove_entry (GUPnPContextFilter *context_filter,
  *
  * Return value: (element-type utf8) (transfer container)(nullable):  a #GList of entries
  * used to filter networks, interfaces,... or %NULL.
- * Do not modify or free the list nor its elements.
  *
  * Since: 1.4.0
  **/
@@ -400,11 +443,11 @@ gupnp_context_filter_clear (GUPnPContextFilter *context_filter)
  * @context: A #GUPnPContext to test.
  *
  * It will check if the @context is allowed or not. The @context_filter will
- * check all its entries againt #GUPnPContext interface, host ip and network
+ * check all its entries against #GUPnPContext interface, host IP and network
  * fields information. This function doesn't take into account the
  * @context_filter status (enabled or not).
  *
- * Return value: %TRUE if @context is matching the @context_filter criterias,
+ * Return value: %TRUE if @context is matching the @context_filter criteria,
  * %FALSE otherwise.
  *
  * Since: 1.4.0
@@ -414,11 +457,9 @@ gupnp_context_filter_check_context (GUPnPContextFilter *context_filter,
                                     GUPnPContext *context)
 {
         GSSDPClient *client;
-        GList *l;
         const char *interface;
         const char *host_ip;
         const char *network;
-        gboolean match = FALSE;
         GUPnPContextFilterPrivate *priv;
 
         g_return_val_if_fail (GUPNP_IS_CONTEXT_FILTER (context_filter), FALSE);
@@ -431,17 +472,7 @@ gupnp_context_filter_check_context (GUPnPContextFilter *context_filter,
         host_ip = gssdp_client_get_host_ip (client);
         network = gssdp_client_get_network (client);
 
-        GList *head = l = g_hash_table_get_keys (priv->entries);
-
-        while (l && !match) {
-                match = (interface && !strcmp (l->data, interface)) ||
-                        (host_ip && !strcmp (l->data, host_ip)) ||
-                        (network && !strcmp (l->data, network));
-
-                l = l->next;
-        }
-
-        g_list_free (head);
-
-        return match;
+        return g_hash_table_contains (priv->entries, interface) ||
+               g_hash_table_contains (priv->entries, host_ip) ||
+               g_hash_table_contains (priv->entries, network);
 }

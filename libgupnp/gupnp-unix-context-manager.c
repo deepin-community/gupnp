@@ -9,6 +9,8 @@
  *
  */
 
+#define G_LOG_DOMAIN "gupnp-unix-context-manager"
+
 /**
  * SECTION:gupnp-unix-context-manager
  * @short_description: Unix-specific implementation of #GUPnPContextManager.
@@ -30,7 +32,6 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <ifaddrs.h>
-#include <libsoup/soup-address.h>
 #include <glib/gstdio.h>
 #include <libgssdp/gssdp-error.h>
 

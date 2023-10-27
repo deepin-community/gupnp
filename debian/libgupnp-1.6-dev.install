@@ -1,0 +1,8 @@
+usr/bin/gupnp-binding-tool*
+usr/include/gupnp-1.6/*
+usr/lib/*/*.so
+usr/lib/*/pkgconfig/*
+usr/share/gir-1.0/GUPnP-1.6.gir
+usr/share/man/man1/gupnp-binding-tool*
+usr/share/vala/vapi/gupnp-1.6.vapi
+usr/share/vala/vapi/gupnp-1.6.deps
