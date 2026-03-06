@@ -22,9 +22,9 @@ execute_before_dh_clean:
 override_dh_auto_configure:
 	dh_auto_configure -- -Dgtk_doc=true $(CONFFLAGS)
 
-# Make the tests non-fatal on kfreebsd-* as multicast requires to explicitly
+# Make the tests non-fatal on hurd-* as multicast requires to explicitly
 # setup a route
-ifneq (,$(filter $(DEB_HOST_ARCH),kfreebsd-amd64 kfreebsd-i386 hurd-i386))
+ifneq (,$(filter $(DEB_HOST_ARCH),hurd-amd64 hurd-i386))
 override_dh_auto_test:
 	dh_auto_test || true
 endif

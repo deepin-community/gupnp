@@ -133,6 +133,7 @@ G_BEGIN_DECLS
         } G_STMT_END
 
 struct _GUPnPServiceProxyAction {
+        GUPnPServiceProxy *proxy;
         char *name;
         gint header_pos;
 
@@ -168,5 +169,8 @@ gupnp_service_proxy_action_serialize (GUPnPServiceProxyAction *action,
 G_GNUC_INTERNAL void
 gupnp_service_proxy_action_check_response (GUPnPServiceProxyAction *action);
 G_END_DECLS
+
+G_GNUC_INTERNAL void
+gupnp_service_proxy_action_reset (GUPnPServiceProxyAction *action);
 
 #endif /* GUPNP_SERVICE_PROXY_ACTION_H */

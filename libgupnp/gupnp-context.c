@@ -631,7 +631,7 @@ gupnp_context_new (const char   *iface,
  * Creates a GUPnP context with address @addr on network interface @iface. If
  * neither is specified, GUPnP will chose the address it deems most suitable.
  *
- * Since: 1.6.
+ * Since: 1.6
  *
  * Return value: (nullable):  A new #GSSDPClient object or %NULL on error.
  */
@@ -669,7 +669,7 @@ gupnp_context_new_full (const char *iface,
  * Creates a GUPnP context with address @addr. If none is specified, GUPnP
  * will chose the address it deems most suitable.
  *
- * Since: 1.6.
+ * Since: 1.6
  *
  * Return value: (nullable):  A new #GSSDPClient object or %NULL on error.
  */
@@ -1714,6 +1714,11 @@ gupnp_context_rewrite_uri_to_uri (GUPnPContext *context, const char *uri)
 
         host = g_uri_get_host (soup_uri);
         addr = g_inet_address_new_from_string (host);
+
+        if (addr == NULL) {
+                return soup_uri;
+        }
+
         index = gssdp_client_get_index (GSSDP_CLIENT (context));
 
         if (g_inet_address_get_is_link_local (addr) &&

@@ -472,10 +472,12 @@ thread_func (gpointer data)
         gupnp_service_proxy_call_action (gpd.p, action, d->cancellable, &error);
         gupnp_service_proxy_action_unref (action);
 
-        if (d->expected_error.domain != 0)
+        if (d->expected_error.domain != 0) {
                 g_assert_error (error,
                                 d->expected_error.domain,
                                 d->expected_error.code);
+                g_clear_error (&error);
+        }
 
         g_object_unref (gpd.p);
         g_object_unref (cp);
@@ -553,10 +555,15 @@ test_cancel_sync_call (ProxyTestFixture *tf, gconstpointer user_data)
 
         g_thread_join (t);
 
+        // Free action. There should not be any callback
+        gupnp_service_action_return_success (
+                (GUPnPServiceAction *) tf->payload);
+
         // Spin the loop for a bit...
         g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, tf->loop);
         g_main_loop_run (tf->loop);
         g_thread_unref (t);
+        g_object_unref (d.cancellable);
 }
 
 void
@@ -638,6 +645,425 @@ test_finish_soap_error_sync (ProxyTestFixture *tf, gconstpointer user_data)
         g_thread_unref (t);
 }
 
+void
+auth_message_callback (GObject      *source,
+                       GAsyncResult *res,
+                       gpointer      user_data)
+{
+        ProxyTestFixture *tf = user_data;
+        GError *error = NULL;
+        GBytes *bytes = soup_session_send_and_read_finish (SOUP_SESSION (source),
+                                                      res,
+                                                      &error);
+        g_assert_no_error (error);
+        g_assert_null (g_bytes_get_data (bytes, NULL));
+
+        g_main_loop_quit (tf->loop);
+}
+
+static gboolean
+on_auth_verification_callback (SoupAuthDomain    *domain,
+                               SoupServerMessage *msg,
+                               const char        *username,
+                               const char        *password,
+                               gpointer           user_data)
+{
+        if (g_strcmp0 (username, "user") == 0 && g_strcmp0 (password, "password") == 0)
+                return TRUE;
+
+        return FALSE;
+}
+
+void
+on_test_async_unauth_call (GObject *source, GAsyncResult *res, gpointer user_data)
+{
+        GError *error = NULL;
+        g_assert_nonnull (user_data);
+
+        gupnp_service_proxy_call_action_finish (GUPNP_SERVICE_PROXY (source),
+                                                res,
+                                                &error);
+        g_assert_nonnull (error);
+        g_assert_error (error, GUPNP_SERVER_ERROR, GUPNP_SERVER_ERROR_OTHER);
+        g_clear_error (&error);
+
+        ProxyTestFixture *tf = (ProxyTestFixture *) user_data;
+        g_main_loop_quit (tf->loop);
+}
+
+void
+on_test_async_auth_call (GObject *source, GAsyncResult *res, gpointer user_data)
+{
+        GError *error = NULL;
+        g_assert_nonnull (user_data);
+
+        gupnp_service_proxy_call_action_finish (GUPNP_SERVICE_PROXY (source),
+                                                res,
+                                                &error);
+        g_assert_no_error (error);
+
+        ProxyTestFixture *tf = (ProxyTestFixture *) user_data;
+        g_main_loop_quit (tf->loop);
+}
+
+void
+test_finish_soap_authentication_no_credentials (ProxyTestFixture *tf, gconstpointer user_data)
+{
+        SoupServer *soup_server = gupnp_context_get_server (tf->server_context);
+        SoupAuthDomain *auth_domain;
+        GUPnPServiceProxyAction *action;
+
+        auth_domain = soup_auth_domain_basic_new ("realm", "Test", NULL);
+        soup_auth_domain_add_path (auth_domain, "/TestService/Control");
+        soup_auth_domain_basic_set_auth_callback (auth_domain,
+                                                  on_auth_verification_callback,
+                                                  tf,
+                                                  NULL);
+        soup_server_add_auth_domain (soup_server, auth_domain);
+
+        g_signal_connect (tf->service,
+                          "action-invoked::Ping",
+                          G_CALLBACK (on_test_async_call_ping_success),
+                          tf);
+
+        action = gupnp_service_proxy_action_new ("Ping", NULL);
+
+
+        gupnp_service_proxy_call_action_async (tf->proxy,
+                                               action,
+                                               NULL,
+                                               on_test_async_unauth_call,
+                                               tf);
+        gupnp_service_proxy_action_unref (action);
+        test_run_loop(tf->loop, g_test_get_path());
+
+        // Spin the loop for a bit...
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, tf->loop);
+        g_main_loop_run (tf->loop);
+
+        g_object_unref (auth_domain);
+}
+
+void
+test_finish_soap_authentication_wrong_credentials (ProxyTestFixture *tf, gconstpointer user_data)
+{
+        SoupServer *soup_server = gupnp_context_get_server (tf->server_context);
+        SoupAuthDomain *auth_domain;
+        GUPnPServiceProxyAction *action;
+
+        auth_domain = soup_auth_domain_basic_new ("realm", "Test", NULL);
+        soup_auth_domain_add_path (auth_domain, "/TestService/Control");
+        soup_auth_domain_basic_set_auth_callback (auth_domain,
+                                                  on_auth_verification_callback,
+                                                  tf,
+                                                  NULL);
+        soup_server_add_auth_domain (soup_server, auth_domain);
+
+        g_signal_connect (tf->service,
+                          "action-invoked::Ping",
+                          G_CALLBACK (on_test_async_call_ping_success),
+                          tf);
+
+        gupnp_service_proxy_set_credentials (tf->proxy, "user", "wrong_password");
+        action = gupnp_service_proxy_action_new ("Ping", NULL);
+
+        gupnp_service_proxy_call_action_async (tf->proxy,
+                                               action,
+                                               NULL,
+                                               on_test_async_unauth_call,
+                                               tf);
+        gupnp_service_proxy_action_unref (action);
+        test_run_loop(tf->loop, g_test_get_path());
+
+        // Spin the loop for a bit...
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, tf->loop);
+        g_main_loop_run (tf->loop);
+
+        g_object_unref (auth_domain);
+}
+
+void
+test_finish_soap_authentication_valid_credentials (ProxyTestFixture *tf, gconstpointer user_data)
+{
+        SoupServer *soup_server = gupnp_context_get_server (tf->server_context);
+        SoupAuthDomain *auth_domain;
+        GUPnPServiceProxyAction *action;
+
+        auth_domain = soup_auth_domain_basic_new ("realm", "Test", NULL);
+        soup_auth_domain_add_path (auth_domain, "/TestService/Control");
+        soup_auth_domain_basic_set_auth_callback (auth_domain,
+                                                  on_auth_verification_callback,
+                                                  tf,
+                                                  NULL);
+        soup_server_add_auth_domain (soup_server, auth_domain);
+
+        g_signal_connect (tf->service,
+                          "action-invoked::Ping",
+                          G_CALLBACK (on_test_async_call_ping_success),
+                          tf);
+
+        gupnp_service_proxy_set_credentials (tf->proxy, "user", "password");
+        action = gupnp_service_proxy_action_new ("Ping", NULL);
+
+        gupnp_service_proxy_call_action_async (tf->proxy,
+                                               action,
+                                               NULL,
+                                               on_test_async_auth_call,
+                                               tf);
+        gupnp_service_proxy_action_unref (action);
+        test_run_loop(tf->loop, g_test_get_path());
+
+        // Spin the loop for a bit...
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, tf->loop);
+        g_main_loop_run (tf->loop);
+        g_object_unref (auth_domain);
+}
+
+void
+on_test_action_iter_call_browse (G_GNUC_UNUSED GUPnPService *service,
+                                 GUPnPServiceAction *action,
+                                 G_GNUC_UNUSED gpointer user_data)
+{
+        gupnp_service_action_set (action,
+                                  "Result",
+                                  G_TYPE_STRING,
+                                  "FAKE_RESULT",
+                                  "NumberReturned",
+                                  G_TYPE_UINT,
+                                  10,
+                                  "TotalMatches",
+                                  G_TYPE_UINT,
+                                  10,
+                                  "UpdateID",
+                                  G_TYPE_UINT,
+                                  12345,
+                                  NULL);
+        gupnp_service_action_return_success (action);
+}
+
+void
+test_action_iter (ProxyTestFixture *tf, gconstpointer user_data)
+{
+        g_signal_connect (tf->service,
+                          "action-invoked::Browse",
+                          G_CALLBACK (on_test_action_iter_call_browse),
+                          tf);
+
+        GUPnPServiceProxyAction *action;
+        action = gupnp_service_proxy_action_new ("Browse",
+                                                 "ObjectID",
+                                                 G_TYPE_STRING,
+                                                 "0",
+                                                 "BrowseFlag",
+                                                 G_TYPE_STRING,
+                                                 "BrowseDirectChildren",
+                                                 "Filter",
+                                                 G_TYPE_STRING,
+                                                 "res,dc:date,res@size",
+                                                 "StartingIndex",
+                                                 G_TYPE_UINT,
+                                                 0,
+                                                 "RequestedCount",
+                                                 G_TYPE_UINT,
+                                                 0,
+                                                 "SortCriteria",
+                                                 G_TYPE_STRING,
+                                                 "",
+                                                 NULL);
+
+        gupnp_service_proxy_call_action_async (tf->proxy,
+                                               action,
+                                               NULL,
+                                               on_test_async_auth_call,
+                                               tf);
+        test_run_loop (tf->loop, g_test_get_path ());
+
+        GError *error = NULL;
+        GUPnPServiceProxyActionIter *iter =
+                gupnp_service_proxy_action_iterate (action, &error);
+        g_assert (G_OBJECT_TYPE (iter) != G_TYPE_NONE);
+        g_assert (G_IS_OBJECT (iter));
+        g_assert_no_error (error);
+        g_assert_nonnull (iter);
+
+        g_assert (gupnp_service_proxy_action_iter_next (iter));
+
+        g_assert_cmpstr (gupnp_service_proxy_action_iter_get_name (iter),
+                         ==,
+                         "Result");
+
+        GValue value = G_VALUE_INIT;
+        g_assert (gupnp_service_proxy_action_iter_get_value (iter, &value));
+        g_assert (G_VALUE_HOLDS_STRING (&value));
+        g_assert_cmpstr (g_value_get_string (&value), ==, "FAKE_RESULT");
+        g_value_unset (&value);
+
+        g_assert (gupnp_service_proxy_action_iter_next (iter));
+
+        g_assert_cmpstr (gupnp_service_proxy_action_iter_get_name (iter),
+                         ==,
+                         "NumberReturned");
+
+        g_assert (gupnp_service_proxy_action_iter_get_value (iter, &value));
+        g_assert (G_VALUE_HOLDS_STRING (&value));
+        g_assert_cmpstr (g_value_get_string (&value), ==, "10");
+        g_value_unset (&value);
+
+        g_assert (gupnp_service_proxy_action_iter_next (iter));
+
+        g_assert_cmpstr (gupnp_service_proxy_action_iter_get_name (iter),
+                         ==,
+                         "TotalMatches");
+
+        g_assert (gupnp_service_proxy_action_iter_get_value (iter, &value));
+        g_assert (G_VALUE_HOLDS_STRING (&value));
+        g_assert_cmpstr (g_value_get_string (&value), ==, "10");
+        g_value_unset (&value);
+
+        gupnp_service_proxy_action_unref (action);
+        g_assert (gupnp_service_proxy_action_iter_next (iter));
+
+        g_assert_cmpstr (gupnp_service_proxy_action_iter_get_name (iter),
+                         ==,
+                         "UpdateID");
+
+        g_assert (gupnp_service_proxy_action_iter_get_value (iter, &value));
+        g_assert (G_VALUE_HOLDS_STRING (&value));
+        g_assert_cmpstr (g_value_get_string (&value), ==, "12345");
+        g_value_unset (&value);
+
+        g_assert (!gupnp_service_proxy_action_iter_next (iter));
+
+        // Spin the loop for a bit...
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, tf->loop);
+        g_main_loop_run (tf->loop);
+
+        g_object_unref (iter);
+}
+
+void
+on_introspection (GObject *source, GAsyncResult *res, gpointer data)
+{
+        ProxyTestFixture *tf = data;
+        GError *error = NULL;
+
+        GObject *obj = G_OBJECT (gupnp_service_info_introspect_finish (
+                GUPNP_SERVICE_INFO (source),
+                res,
+                &error));
+        g_assert_no_error (error);
+        g_assert_nonnull (obj);
+        g_object_unref (obj);
+
+        g_main_loop_quit (tf->loop);
+}
+
+void
+test_action_iter_introspected (ProxyTestFixture *tf, gconstpointer user_data)
+{
+        gupnp_service_info_introspect_async (GUPNP_SERVICE_INFO (tf->proxy),
+                                             NULL,
+                                             on_introspection,
+                                             tf);
+
+        test_run_loop (tf->loop, g_test_get_path ());
+
+        g_signal_connect (tf->service,
+                          "action-invoked::Browse",
+                          G_CALLBACK (on_test_action_iter_call_browse),
+                          tf);
+
+        GUPnPServiceProxyAction *action;
+        action = gupnp_service_proxy_action_new ("Browse",
+                                                 "ObjectID",
+                                                 G_TYPE_STRING,
+                                                 "0",
+                                                 "BrowseFlag",
+                                                 G_TYPE_STRING,
+                                                 "BrowseDirectChildren",
+                                                 "Filter",
+                                                 G_TYPE_STRING,
+                                                 "res,dc:date,res@size",
+                                                 "StartingIndex",
+                                                 G_TYPE_UINT,
+                                                 0,
+                                                 "RequestedCount",
+                                                 G_TYPE_UINT,
+                                                 0,
+                                                 "SortCriteria",
+                                                 G_TYPE_STRING,
+                                                 "",
+                                                 NULL);
+
+        gupnp_service_proxy_call_action_async (tf->proxy,
+                                               action,
+                                               NULL,
+                                               on_test_async_auth_call,
+                                               tf);
+        test_run_loop (tf->loop, g_test_get_path ());
+
+        GError *error = NULL;
+        GUPnPServiceProxyActionIter *iter =
+                gupnp_service_proxy_action_iterate (action, &error);
+        g_assert_no_error (error);
+        g_assert_nonnull (iter);
+
+        g_assert (gupnp_service_proxy_action_iter_next (iter));
+
+        g_assert_cmpstr (gupnp_service_proxy_action_iter_get_name (iter),
+                         ==,
+                         "Result");
+
+        GValue value = G_VALUE_INIT;
+
+        g_assert (gupnp_service_proxy_action_iter_get_value (iter, &value));
+        g_assert (G_VALUE_HOLDS_STRING (&value));
+        g_assert_cmpstr (g_value_get_string (&value), ==, "FAKE_RESULT");
+        g_value_unset (&value);
+
+        g_assert (gupnp_service_proxy_action_iter_next (iter));
+
+        g_assert_cmpstr (gupnp_service_proxy_action_iter_get_name (iter),
+                         ==,
+                         "NumberReturned");
+
+        g_assert (gupnp_service_proxy_action_iter_get_value (iter, &value));
+        g_assert (G_VALUE_HOLDS_UINT (&value));
+        g_assert_cmpuint (g_value_get_uint (&value), ==, 10);
+        g_value_unset (&value);
+
+        g_assert (gupnp_service_proxy_action_iter_next (iter));
+
+        g_assert_cmpstr (gupnp_service_proxy_action_iter_get_name (iter),
+                         ==,
+                         "TotalMatches");
+
+        g_assert (gupnp_service_proxy_action_iter_get_value (iter, &value));
+        g_assert (G_VALUE_HOLDS_UINT (&value));
+        g_assert_cmpuint (g_value_get_uint (&value), ==, 10);
+        g_value_unset (&value);
+
+        gupnp_service_proxy_action_unref (action);
+        g_assert (gupnp_service_proxy_action_iter_next (iter));
+
+        g_assert_cmpstr (gupnp_service_proxy_action_iter_get_name (iter),
+                         ==,
+                         "UpdateID");
+
+        g_assert (gupnp_service_proxy_action_iter_get_value (iter, &value));
+        g_assert (G_VALUE_HOLDS_UINT (&value));
+        g_assert_cmpuint (g_value_get_uint (&value), ==, 12345);
+        g_value_unset (&value);
+
+        g_assert (!gupnp_service_proxy_action_iter_next (iter));
+
+        // Spin the loop for a bit...
+        g_timeout_add (500, (GSourceFunc) delayed_loop_quitter, tf->loop);
+        g_main_loop_run (tf->loop);
+
+        g_object_unref (iter);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -697,6 +1123,41 @@ main (int argc, char *argv[])
                     "127.0.0.1",
                     test_fixture_setup,
                     test_finish_soap_error_sync,
+                    test_fixture_teardown);
+
+        g_test_add ("/service-proxy/authentication/no-credentials",
+                    ProxyTestFixture,
+                    "127.0.0.1",
+                    test_fixture_setup,
+                    test_finish_soap_authentication_no_credentials,
+                    test_fixture_teardown);
+
+        g_test_add ("/service-proxy/authentication/wrong-credentials",
+                    ProxyTestFixture,
+                    "127.0.0.1",
+                    test_fixture_setup,
+                    test_finish_soap_authentication_wrong_credentials,
+                    test_fixture_teardown);
+
+        g_test_add ("/service-proxy/authentication/valid-credentials",
+                    ProxyTestFixture,
+                    "127.0.0.1",
+                    test_fixture_setup,
+                    test_finish_soap_authentication_valid_credentials,
+                    test_fixture_teardown);
+
+        g_test_add ("/service-proxy/action/iter",
+                    ProxyTestFixture,
+                    "127.0.0.1",
+                    test_fixture_setup,
+                    test_action_iter,
+                    test_fixture_teardown);
+
+        g_test_add ("/service-proxy/action/iter_introspected",
+                    ProxyTestFixture,
+                    "127.0.0.1",
+                    test_fixture_setup,
+                    test_action_iter_introspected,
                     test_fixture_teardown);
 
         return g_test_run ();

@@ -1,0 +1,25 @@
+From: Simon McVittie <smcv@collabora.com>
+Date: Wed, 19 Mar 2025 14:25:14 +0000
+Subject: doc: Update URL to libsoup
+
+Similar to GNOME/libsoup!444, Teams/Websites/developer.gnome.org!214
+
+Signed-off-by: Simon McVittie <smcv@collabora.com>
+Forwarded: https://gitlab.gnome.org/GNOME/gupnp/-/merge_requests/39
+---
+ doc/gupnp.toml.in | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/doc/gupnp.toml.in b/doc/gupnp.toml.in
+index 9345c01..650a340 100644
+--- a/doc/gupnp.toml.in
++++ b/doc/gupnp.toml.in
+@@ -37,7 +37,7 @@ docs_url = "https://gnome.pages.gitlab.gnome.org/gssdp/docs/"
+ [dependencies."Soup-3.0"]
+ name = "Soup"
+ description = "A HTTP handling library"
+-docs_url = "https://libsoup.org/libsoup-3.0/index.html"
++docs_url = "https://libsoup.gnome.org/libsoup-3.0/index.html"
+ 
+ [dependencies."libxml2-2.0"]
+ name = "LibXML2"

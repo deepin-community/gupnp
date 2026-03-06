@@ -15,17 +15,17 @@
 #include <gmodule.h>
 #include <string.h>
 
-#include "gupnp-service.h"
-#include "gupnp-root-device.h"
+#include "gena-protocol.h"
+#include "gupnp-acl.h"
 #include "gupnp-context-private.h"
 #include "gupnp-error.h"
-#include "gupnp-acl.h"
-#include "gupnp-uuid.h"
+#include "gupnp-root-device.h"
+#include "gupnp-service-info-private.h"
 #include "gupnp-service-private.h"
-#include "http-headers.h"
-#include "gena-protocol.h"
-#include "xml-util.h"
+#include "gupnp-service.h"
+#include "gupnp-uuid.h"
 #include "gvalue-util.h"
+#include "xml-util.h"
 
 #define SUBSCRIPTION_TIMEOUT 300 /* DLNA (7.2.22.1) enforced */
 
@@ -43,8 +43,6 @@ struct _GUPnPServicePrivate {
         GQueue                    *notify_queue;
 
         gboolean                   notify_frozen;
-
-        GUPnPServiceIntrospection *introspection;
 
         GList                     *pending_autoconnect;
 };
@@ -417,7 +415,11 @@ control_server_handler (SoupServer *server,
                 *end = '\0';
 
         /* Parse action_node */
-        doc = xmlRecoverMemory (request_body->data, request_body->length);
+        doc = xmlReadMemory (request_body->data,
+                             request_body->length,
+                             NULL,
+                             NULL,
+                             XML_PARSE_NONET | XML_PARSE_RECOVER);
         if (doc == NULL) {
                 soup_server_message_set_status (msg,
                                                 SOUP_STATUS_BAD_REQUEST,
@@ -925,10 +927,11 @@ got_introspection (GObject          *source,
         GHashTableIter iter;
         gpointer data;
 
-        priv->introspection = gupnp_service_info_introspect_finish (
-                GUPNP_SERVICE_INFO (source),
-                res,
-                &error);
+        GUPnPServiceIntrospection *introspection =
+                gupnp_service_info_introspect_finish (
+                        GUPNP_SERVICE_INFO (source),
+                        res,
+                        &error);
 
         if (error != NULL) {
                 g_warning ("Failed to get SCPD: %s\n"
@@ -937,7 +940,7 @@ got_introspection (GObject          *source,
                 g_clear_error (&error);
         } else {
                 /* Handle pending auto-connects */
-                g_object_ref (priv->introspection);
+                g_object_ref (introspection);
                 /* _autoconnect() just calls prepend() so we reverse the list
                  * here.
                  */
@@ -957,7 +960,7 @@ got_introspection (GObject          *source,
 
                 state_variables =
                         gupnp_service_introspection_list_state_variables (
-                                priv->introspection);
+                                introspection);
 
                 for (l = state_variables; l; l = l->next) {
                         GUPnPServiceStateVariableInfo *variable;
@@ -972,8 +975,10 @@ got_introspection (GObject          *source,
                                                 g_strdup (variable->name));
                 }
 
-                g_object_unref (priv->introspection);
+                g_object_unref (introspection);
         }
+
+        g_object_unref (introspection);
 
         g_hash_table_iter_init (&iter, priv->subscriptions);
 
@@ -1210,7 +1215,6 @@ gupnp_service_finalize (GObject *object)
                            (GDestroyNotify) notify_data_free);
 
         g_clear_object (&priv->session);
-        g_clear_object (&priv->introspection);
 
         /* Call super */
         object_class = G_OBJECT_CLASS (gupnp_service_parent_class);
@@ -1822,7 +1826,8 @@ gupnp_service_signals_autoconnect (GUPnPService *service,
 
         priv = gupnp_service_get_instance_private (service);
 
-        introspection = priv->introspection;
+        introspection = gupnp_service_info_get_introspection (
+                GUPNP_SERVICE_INFO (service));
 
         if (!introspection) {
                 /* Initial introspection is not done yet, delay until we

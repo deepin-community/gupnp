@@ -1,3 +1,54 @@
+gupnp (1.6.8-2) unstable; urgency=medium
+
+  [ Simon McVittie ]
+  * d/p/doc-Update-URL-to-libsoup.patch:
+    Update URL to libsoup documentation, avoiding an expired domain that
+    is no longer under GNOME's control
+
+  [ Jeremy Bícha ]
+  * Update Homepage
+  * Add Build-Depends: gir1.2-gssdp-1.6-dev
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Sat, 22 Mar 2025 14:46:01 -0400
+
+gupnp (1.6.8-1) unstable; urgency=medium
+
+  * New upstream release
+  * debian/libgupnp-1.6-0.symbols: Add new symbol
+  * Add ${gir:Depends} & ${gir:Provides} to -dev package
+  * Run wrap-and-sort
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Wed, 05 Feb 2025 16:31:51 -0500
+
+gupnp (1.6.7-1) unstable; urgency=medium
+
+  * New upstream release
+  * Bump Standards Version to 4.7.0
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Wed, 20 Nov 2024 10:24:09 -0500
+
+gupnp (1.6.6-1) unstable; urgency=medium
+
+  * New upstream release
+  * debian/libgupnp-1.6-0.symbols: Add new symbols
+  * Stop using debian/control.in and dh-sequence-gnome
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Mon, 27 Nov 2023 10:49:17 -0500
+
+gupnp (1.6.5-1) unstable; urgency=medium
+
+  * New upstream release
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Thu, 10 Aug 2023 14:56:34 -0400
+
+gupnp (1.6.4-1) unstable; urgency=medium
+
+  * New upstream release
+  * debian/libgupnp-1.6-0.symbols: Add new symbol
+  * Update standards version to 4.6.2, no changes needed
+
+ -- Jeremy Bícha <jbicha@ubuntu.com>  Thu, 27 Jul 2023 16:02:31 +0300
+
 gupnp (1.6.3-1) unstable; urgency=medium
 
   * Team upload.
