@@ -16,6 +16,8 @@
 #include <locale.h>
 #include <errno.h>
 
+#include <libxml/globals.h>
+
 #include "gena-protocol.h"
 #include "gupnp-context-private.h"
 #include "gupnp-error-private.h"
@@ -31,6 +33,10 @@ struct _GUPnPServiceProxyPrivate {
         gboolean subscribed;
 
         char *path; /* Path to this proxy */
+
+        // Credentials
+        char *user;
+        char *password;
 
         char *sid; /* Subscription ID */
         GSource *subscription_timeout_src;
@@ -267,6 +273,9 @@ gupnp_service_proxy_finalize (GObject *object)
 
         g_hash_table_destroy (priv->notify_hash);
 
+        g_clear_pointer (&priv->user, g_free);
+        g_clear_pointer (&priv->password, g_free);
+
         /* Call super */
         object_class = G_OBJECT_CLASS (gupnp_service_proxy_parent_class);
         object_class->finalize (object);
@@ -325,6 +334,42 @@ gupnp_service_proxy_class_init (GUPnPServiceProxyClass *klass)
                               G_TYPE_POINTER);
 }
 
+static gboolean
+on_authenticate (SoupMessage *msg,
+                 SoupAuth    *auth,
+                 gboolean     retrying,
+                 gpointer     user_data)
+{
+        GUPnPServiceProxy *proxy = user_data;
+        GUPnPServiceProxyPrivate *priv;
+
+        priv = gupnp_service_proxy_get_instance_private (proxy);
+
+        if (!retrying && priv->user != NULL && priv->password != NULL) {
+            soup_auth_authenticate (auth, priv->user, priv->password);
+            return FALSE;
+        }
+
+        return FALSE;
+}
+
+static void
+on_restarted (SoupMessage *msg, gpointer user_data)
+{
+        GUPnPServiceProxyAction *action = user_data;
+        g_autoptr (GBytes) body = NULL;
+        const char *service_type;
+
+        service_type = gupnp_service_info_get_service_type
+                                        (GUPNP_SERVICE_INFO (action->proxy));
+        gupnp_service_proxy_action_serialize (action, service_type);
+        body = g_string_free_to_bytes (action->msg_str);
+        soup_message_set_request_body_from_bytes (msg,
+                                                  "text/xml; charset=\"utf-8\"",
+                                                  body);
+        action->msg_str = NULL;
+}
+
 /* Begins a basic action message */
 static gboolean
 prepare_action_msg (GUPnPServiceProxy *proxy,
@@ -334,6 +379,8 @@ prepare_action_msg (GUPnPServiceProxy *proxy,
 {
         char *control_url, *full_action;
         const char *service_type;
+
+        gupnp_service_proxy_action_reset (action);
 
         /* Make sure we have a service type */
         service_type = gupnp_service_info_get_service_type
@@ -369,8 +416,9 @@ prepare_action_msg (GUPnPServiceProxy *proxy,
         local_control_url = gupnp_context_rewrite_uri (context, control_url);
         g_free (control_url);
 
-        g_clear_object (&action->msg);
         action->msg = soup_message_new (method, local_control_url);
+        g_signal_connect_object (G_OBJECT (action->msg), "authenticate", G_CALLBACK (on_authenticate), G_OBJECT (proxy), 0);
+        g_signal_connect (G_OBJECT (action->msg), "restarted", G_CALLBACK (on_restarted), action);
         g_free (local_control_url);
 
         SoupMessageHeaders *headers =
@@ -411,11 +459,15 @@ prepare_action_msg (GUPnPServiceProxy *proxy,
         g_bytes_unref (body);
         action->msg_str = NULL;
 
+        action->proxy = proxy;
+        g_object_add_weak_pointer (G_OBJECT (proxy),
+                                   (gpointer *) &(action->proxy));
+
         return TRUE;
 }
 
 static void
-gupnp_service_proxy_action_queue_task (GUPnPServiceProxy *proxy, GTask *task);
+gupnp_service_proxy_action_queue_task (GTask *task);
 
 static void
 action_task_got_response (GObject *source,
@@ -424,8 +476,8 @@ action_task_got_response (GObject *source,
 {
         GTask *task = G_TASK (user_data);
         GError *error = NULL;
-        GUPnPServiceProxyAction *action = (GUPnPServiceProxyAction *) g_task_get_task_data (task);
-        GUPnPServiceProxy *proxy = GUPNP_SERVICE_PROXY(g_task_get_source_object (task));
+        GUPnPServiceProxyAction *action =
+                (GUPnPServiceProxyAction *) g_task_get_task_data (task);
 
         action->response =
                 soup_session_send_and_read_finish (SOUP_SESSION (source),
@@ -447,8 +499,8 @@ action_task_got_response (GObject *source,
                                  "POST")) {
                         g_debug ("POST returned with METHOD_NOT_ALLOWED, "
                                  "trying with M-POST");
-                        g_bytes_unref (action->response);
-                        if (!prepare_action_msg (proxy,
+                        g_clear_pointer (&action->response, g_bytes_unref);
+                        if (!prepare_action_msg (action->proxy,
                                                  action,
                                                  "M-POST",
                                                  &error)) {
@@ -457,7 +509,7 @@ action_task_got_response (GObject *source,
 
                                 g_object_unref (task);
                         } else {
-                                gupnp_service_proxy_action_queue_task (proxy, task);
+                                gupnp_service_proxy_action_queue_task (task);
                         }
 
                 } else {
@@ -487,15 +539,15 @@ action_task_got_response (GObject *source,
 }
 
 static void
-gupnp_service_proxy_action_queue_task (GUPnPServiceProxy *proxy, GTask *task)
+gupnp_service_proxy_action_queue_task (GTask *task)
 {
         GUPnPContext *context;
         SoupSession *session;
         GUPnPServiceProxyAction *action = g_task_get_task_data (task);
 
         /* Send the message */
-        context = gupnp_service_info_get_context
-                                (GUPNP_SERVICE_INFO (proxy));
+        context = gupnp_service_info_get_context (
+                GUPNP_SERVICE_INFO (action->proxy));
         session = gupnp_context_get_session (context);
 
         soup_session_send_and_read_async (
@@ -1002,7 +1054,11 @@ server_handler (G_GNUC_UNUSED SoupServer *soup_server,
                 soup_server_message_get_request_body (msg);
 
         /* Parse the actual XML message content */
-        doc = xmlRecoverMemory (request_body->data, request_body->length);
+        doc = xmlReadMemory (request_body->data,
+                             request_body->length,
+                             NULL,
+                             NULL,
+                             XML_PARSE_NONET | XML_PARSE_RECOVER);
         if (doc == NULL) {
                 /* Failed */
                 g_warning ("Failed to parse NOTIFY message body");
@@ -1546,9 +1602,10 @@ gupnp_service_proxy_call_action_async (GUPnPServiceProxy       *proxy,
         char *task_name = g_strdup_printf ("UPnP Call \"%s\"", action->name);
         g_task_set_name (task, task_name);
         g_free (task_name);
-        g_task_set_task_data (task,
-                              gupnp_service_proxy_action_ref (action),
-                              (GDestroyNotify) gupnp_service_proxy_action_unref);
+        g_task_set_task_data (
+                task,
+                gupnp_service_proxy_action_ref (action),
+                (GDestroyNotify) gupnp_service_proxy_action_unref);
 
         prepare_action_msg (proxy, action, SOUP_METHOD_POST, &error);
 
@@ -1556,7 +1613,7 @@ gupnp_service_proxy_call_action_async (GUPnPServiceProxy       *proxy,
                 g_task_return_error (task, error);
                 g_object_unref (task);
         } else {
-                gupnp_service_proxy_action_queue_task (proxy, task);
+                gupnp_service_proxy_action_queue_task (task);
         }
 }
 
@@ -1579,7 +1636,8 @@ gupnp_service_proxy_call_action_finish (GUPnPServiceProxy *proxy,
 {
         g_return_val_if_fail (g_task_is_valid (G_TASK (result), proxy), NULL);
 
-        GUPnPServiceProxyAction *action = g_task_get_task_data (G_TASK (result));
+        GUPnPServiceProxyAction *action =
+                g_task_get_task_data (G_TASK (result));
         action->pending = FALSE;
 
         return g_task_propagate_pointer (G_TASK (result), error);
@@ -1632,7 +1690,7 @@ gupnp_service_proxy_call_action (GUPnPServiceProxy       *proxy,
                                         action,
                                         "M-POST",
                                         &action->error)) {
-                        g_bytes_unref (action->response);
+                        g_clear_pointer (&action->response, g_bytes_unref);
 
                         action->response =
                                 soup_session_send_and_read (session,
@@ -1653,5 +1711,34 @@ out:
                 return NULL;
         }
 
+        g_clear_weak_pointer (&action->proxy);
+
         return action;
+}
+
+
+/**
+ * gupnp_service_proxy_set_credentials:
+ * @proxy: A #GUPnPServiceProxy
+ * @user: user name for authentication
+ * @password: user password for authentication
+ *
+ * Sets user and password for authentication
+ *
+ * Since: 1.6.4
+ **/
+void
+gupnp_service_proxy_set_credentials (GUPnPServiceProxy *proxy,
+                                     const char        *user,
+                                     const char        *password)
+{
+  GUPnPServiceProxyPrivate *priv;
+
+  priv = gupnp_service_proxy_get_instance_private (proxy);
+
+  g_clear_pointer (&priv->user, g_free);
+  g_clear_pointer (&priv->password, g_free);
+
+  priv->user = g_strdup (user);
+  priv->password = g_strdup (password);
 }

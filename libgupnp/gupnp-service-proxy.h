@@ -9,7 +9,6 @@
 #ifndef GUPNP_SERVICE_PROXY_H
 #define GUPNP_SERVICE_PROXY_H
 
-#include "gupnp-error.h"
 #include "gupnp-service-info.h"
 
 G_BEGIN_DECLS
@@ -53,6 +52,18 @@ struct _GUPnPServiceProxyClass {
  * Opaque structure for holding in-progress action data.
  **/
 typedef struct _GUPnPServiceProxyAction GUPnPServiceProxyAction;
+
+G_DECLARE_FINAL_TYPE (GUPnPServiceProxyActionIter,
+                      gupnp_service_proxy_action_iter,
+                      GUPNP,
+                      SERVICE_PROXY_ACTION_ITER,
+                      GObject);
+/**
+ * GUPnPServiceProxyActionIter:
+ *
+ * An opaque object representing an iterator over the out parameters of an action
+ * Since: 1.6.6
+ **/
 
 /**
  * GUPnPServiceProxyActionCallback:
@@ -131,6 +142,9 @@ gupnp_service_proxy_action_new (const char *action,
                                 ...) G_GNUC_NULL_TERMINATED;
 
 GUPnPServiceProxyAction *
+gupnp_service_proxy_action_new_plain (const char *action);
+
+GUPnPServiceProxyAction *
 gupnp_service_proxy_action_new_from_list (const char *action,
                                           GList      *in_names,
                                           GList      *in_values);
@@ -144,11 +158,35 @@ gupnp_service_proxy_action_unref (GUPnPServiceProxyAction *action);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (GUPnPServiceProxyAction,
                                gupnp_service_proxy_action_unref)
 
+GUPnPServiceProxyAction *
+gupnp_service_proxy_action_add_argument (GUPnPServiceProxyAction *action,
+                                         const char *name,
+                                         const GValue *value);
+
 gboolean
 gupnp_service_proxy_action_set (GUPnPServiceProxyAction *action,
                                 const char *key,
                                 const GValue *value,
                                 GError **error);
+
+GUPnPServiceProxyActionIter *
+gupnp_service_proxy_action_iterate (GUPnPServiceProxyAction *action,
+                                    GError **error);
+
+gboolean
+gupnp_service_proxy_action_iter_next (GUPnPServiceProxyActionIter *self);
+
+const char *
+gupnp_service_proxy_action_iter_get_name (GUPnPServiceProxyActionIter *self);
+
+gboolean
+gupnp_service_proxy_action_iter_get_value (GUPnPServiceProxyActionIter *self,
+                                           GValue *value);
+
+gboolean
+gupnp_service_proxy_action_iter_get_value_as (GUPnPServiceProxyActionIter *self,
+                                              GType type,
+                                              GValue *value);
 
 gboolean
 gupnp_service_proxy_action_get_result (GUPnPServiceProxyAction *action,
@@ -185,6 +223,11 @@ gupnp_service_proxy_call_action (GUPnPServiceProxy       *proxy,
                                  GUPnPServiceProxyAction *action,
                                  GCancellable            *cancellable,
                                  GError                 **error);
+
+void
+gupnp_service_proxy_set_credentials (GUPnPServiceProxy *proxy,
+                                     const char        *user,
+                                     const char        *password);
 
 G_END_DECLS
 

@@ -1,4 +1,4 @@
-project('gupnp', 'c', version : '1.6.3', meson_version : '>= 0.54.0')
+project('gupnp', 'c', version : '1.6.8', meson_version : '>= 0.54.0')
 gnome = import('gnome')
 pkg = import('pkgconfig')
 
@@ -37,7 +37,7 @@ conf.set('GLIB_VERSION_MAX_ALLOWED', 'GLIB_VERSION_@0@'.format(glib_version.unde
 
 subdir('internal')
 
-gssdp_dep = dependency('gssdp-1.6', version : '>= 1.6.2', default_options: ['sniffer=false', 'manpages=false', 'gtk_doc=false'], fallback: 'gssdp-1.6')
+gssdp_dep = dependency('gssdp-1.6', version : '>= 1.6.2', default_options: ['sniffer=false', 'manpages=false', 'gtk_doc=false', 'introspection=' + get_option('introspection').to_string()], fallback: 'gssdp-1.6')
 gio_unix = dependency('gio-unix-2.0', version: '>= 2.44', required: host_machine.system() != 'windows')
 libxml_dep = dependency('libxml-2.0')
 
@@ -57,6 +57,7 @@ subdir('tools')
 
 gidocgen_dep = dependency('gi-docgen', version: '>= 2021.1',
                           fallback: ['gi-docgen', 'dummy_dep'],
+                          native: true,
                           required: get_option('gtk_doc') and get_option('introspection')
                       )
 
